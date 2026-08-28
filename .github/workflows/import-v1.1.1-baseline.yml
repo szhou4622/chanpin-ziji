@@ -30,9 +30,15 @@ jobs:
           tmp="$(mktemp -d)"
           git clone --depth 1 --branch v1.1.1 https://github.com/szhou4622/product-operation-report-app.git "$tmp/source"
 
-          # Keep only the destination repository's .git directory, then copy the audited source tree.
+          # Preserve the destination workflow because GITHUB_TOKEN cannot modify workflow files.
+          mkdir -p "$tmp/preserve-workflows"
+          cp -a .github/workflows/import-v1.1.1-baseline.yml "$tmp/preserve-workflows/"
+
+          # Keep only destination .git, copy the audited source, but exclude source workflows.
           find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
-          rsync -a --exclude='.git' "$tmp/source/" ./
+          rsync -a --exclude='.git' --exclude='.github/workflows/***' "$tmp/source/" ./
+          mkdir -p .github/workflows
+          cp -a "$tmp/preserve-workflows/import-v1.1.1-baseline.yml" .github/workflows/
 
           git add -A
           if git diff --cached --quiet; then
