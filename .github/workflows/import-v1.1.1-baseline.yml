@@ -1,0 +1,54 @@
+name: Import v1.1.1 baseline
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/import-v1.1.1-baseline.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  import:
+    if: github.repository == 'szhou4622/chanpin-ziji'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout destination
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Import audited v1.1.1 baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          git clone --depth 1 --branch v1.1.1 https://github.com/szhou4622/product-operation-report-app.git "$tmp/source"
+          find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+          cp -a "$tmp/source/." .
+          rm -rf .git
+          # Restore destination repository metadata after copying source working tree.
+          git init
+          git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git fetch origin main
+          git checkout -B main origin/main
+          # Replace working tree with exact source baseline while preserving this import workflow only for this commit.
+          find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+          cp -a "$tmp/source/." .
+          rm -rf .git
+          mkdir -p .github/workflows
+          cp "$tmp/source/../source/.github/workflows/build-desktop.yml" .github/workflows/build-desktop.yml || true
+          git add -A
+          if git diff --cached --quiet; then
+            echo 'Baseline already imported.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'chore: import product operation report v1.1.1 baseline'
+          git push origin main
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
