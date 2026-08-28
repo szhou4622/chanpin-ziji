@@ -10,6 +10,7 @@
     "build": "electron-vite build",
     "lint": "node node_modules/eslint/bin/eslint.js \"src/**/*.{ts,tsx}\"",
     "test:unit": "node node_modules/vitest/vitest.mjs run",
+    "test:architecture": "node node_modules/vitest/vitest.mjs run src/shared/architectureGuard.test.ts",
     "test:regression": "node scripts/run-regression.cjs",
     "test:update-release": "node scripts/run-update-release-smoke.cjs",
     "test:html-visual": "node scripts/run-html-visual-smoke.cjs",
