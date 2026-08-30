@@ -35,6 +35,7 @@ import { friendlyError } from './store/errors'
 import { buildProjectSnapshot } from './store/persistence'
 import { mergeRevisionParts, runFinalReportInParts, runModelRetry, selectRevisionParts } from './store/analysis'
 import { isTemporaryReservationContention, planCleaningConcurrency } from './store/cleaning'
+import { removeTaskJournalEntries, writeTaskJournalEntry } from './store/taskJournalAdapter'
 import {
   buildCleaningPlan,
   type CleaningMethod,
@@ -2276,15 +2277,11 @@ export const useStore = create<StoreState>((set, get) => ({
                 }
                 batchOutputs[batchPosition] = verifiedText
                 set((state) => ({
-                  taskJournal: {
-                    ...state.taskJournal,
-                    [batchTaskId]: {
-                      kind: 'source_clean',
-                      status: 'complete',
-                      output: verifiedText,
-                      updatedAt: new Date().toISOString()
-                    }
-                  },
+                  taskJournal: writeTaskJournalEntry(state.taskJournal, batchTaskId, {
+                    kind: 'source_clean',
+                    status: 'complete',
+                    output: verifiedText
+                  }),
                   cleaningProgress: {
                     ...state.cleaningProgress,
                     files: {
@@ -2536,10 +2533,9 @@ export const useStore = create<StoreState>((set, get) => ({
         const message = result.error || '模块没有返回内容'
         updateModuleState(module.key, { status: 'failed', message, updatedAt: new Date().toISOString() })
         set((state) => ({
-          taskJournal: {
-            ...state.taskJournal,
-            [savedTaskId]: { kind: 'module', status: 'failed', output: result.text, inputFingerprint, updatedAt: new Date().toISOString() }
-          }
+          taskJournal: writeTaskJournalEntry(state.taskJournal, savedTaskId, {
+            kind: 'module', status: 'failed', output: result.text, inputFingerprint
+          })
         }))
         return
       }
@@ -2582,20 +2578,18 @@ export const useStore = create<StoreState>((set, get) => ({
         const message = validationErrors.join('；')
         updateModuleState(module.key, { status: 'failed', message, updatedAt: new Date().toISOString() })
         set((state) => ({
-          taskJournal: {
-            ...state.taskJournal,
-            [savedTaskId]: { kind: 'module', status: 'failed', output: moduleOutput, inputFingerprint, updatedAt: new Date().toISOString() }
-          }
+          taskJournal: writeTaskJournalEntry(state.taskJournal, savedTaskId, {
+            kind: 'module', status: 'failed', output: moduleOutput, inputFingerprint
+          })
         }))
         return
       }
       if (isNoAnalysisOutput(moduleOutput)) {
         const output = normalizeNoAnalysisOutput(moduleOutput)
         set((state) => ({
-          taskJournal: {
-            ...state.taskJournal,
-            [savedTaskId]: { kind: 'module', status: 'complete', output, inputFingerprint, updatedAt: new Date().toISOString() }
-          }
+          taskJournal: writeTaskJournalEntry(state.taskJournal, savedTaskId, {
+            kind: 'module', status: 'complete', output, inputFingerprint
+          })
         }))
         updateModuleState(module.key, { status: 'skipped', message: output, updatedAt: new Date().toISOString() })
         await window.api.saveLastProject(buildProjectSnapshot(get()))
@@ -2603,10 +2597,9 @@ export const useStore = create<StoreState>((set, get) => ({
       }
       set((state) => ({
         artifacts: { ...state.artifacts, [module.id]: moduleOutput },
-        taskJournal: {
-          ...state.taskJournal,
-          [savedTaskId]: { kind: 'module', status: 'complete', output: moduleOutput, inputFingerprint, updatedAt: new Date().toISOString() }
-        }
+        taskJournal: writeTaskJournalEntry(state.taskJournal, savedTaskId, {
+          kind: 'module', status: 'complete', output: moduleOutput, inputFingerprint
+        })
       }))
       updateModuleState(module.key, { status: 'done', updatedAt: new Date().toISOString() })
       await window.api.saveLastProject(buildProjectSnapshot(get()))
@@ -2624,10 +2617,9 @@ export const useStore = create<StoreState>((set, get) => ({
         const taskId = `${sessionId}:module:v2:${module.key}`
         updateModuleState(module.key, { status: 'failed', message, updatedAt: new Date().toISOString() })
         set((state) => ({
-          taskJournal: {
-            ...state.taskJournal,
-            [taskId]: { kind: 'module', status: 'failed', updatedAt: new Date().toISOString() }
-          }
+          taskJournal: writeTaskJournalEntry(state.taskJournal, taskId, {
+            kind: 'module', status: 'failed'
+          })
         }))
       }
     }
@@ -2789,9 +2781,10 @@ export const useStore = create<StoreState>((set, get) => ({
     const affectedIds = new Set(REPORT_MODULES.filter((module) => affected.has(module.key)).map((module) => module.id))
     set((state) => ({
       artifacts: Object.fromEntries(Object.entries(state.artifacts).filter(([id]) => !affectedIds.has(Number(id)) && Number(id) !== REPORT_STEP_ID)),
-      taskJournal: Object.fromEntries(Object.entries(state.taskJournal).filter(([taskId]) =>
-        ![...affected].some((moduleKey) => taskId.includes(`:module:v2:${moduleKey}`))
-      )),
+      taskJournal: removeTaskJournalEntries(
+        state.taskJournal,
+        (taskId) => [...affected].some((moduleKey) => taskId.includes(`:module:v2:${moduleKey}`))
+      ),
       moduleStates: Object.fromEntries(Object.entries(state.moduleStates).filter(([moduleKey]) => !affected.has(moduleKey as ModuleKey))),
       reportMarkdown: '',
       reportStale: false,
