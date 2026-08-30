@@ -1,0 +1,51 @@
+name: Phase1A canonical task persistence regression
+
+on:
+  push:
+    branches:
+      - phase1a/task-record-dual-write
+    paths:
+      - '.github/workflows/phase1a-task-record-regression.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: product-operation-report-app
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: phase1a/task-record-dual-write
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: product-operation-report-app/package-lock.json
+
+      - name: Apply persistence regression and verify
+        shell: pwsh
+        working-directory: .
+        run: |
+          python .github/scripts/phase1a-task-record-regression.py
+          Set-Location product-operation-report-app
+          npm ci
+          npm run typecheck
+          npm run test:regression
+          Set-Location ..
+          git diff --check
+
+      - name: Commit verified regression
+        shell: pwsh
+        working-directory: .
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add product-operation-report-app/scripts/regression-main.ts
+          git commit -m 'test: verify canonical task persistence fallback'
+          git push origin HEAD:phase1a/task-record-dual-write
