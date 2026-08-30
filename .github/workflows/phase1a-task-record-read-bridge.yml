@@ -1,0 +1,48 @@
+name: Phase1A task record read bridge
+
+on:
+  push:
+    branches:
+      - phase1a/task-record-read-bridge
+    paths:
+      - '.github/workflows/phase1a-task-record-read-bridge.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: phase1a/task-record-read-bridge
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: product-operation-report-app/package-lock.json
+
+      - name: Apply canonical read bridge and verify
+        shell: bash
+        run: |
+          set -euo pipefail
+          python .github/scripts/phase1a-task-record-read-bridge.py
+          cd product-operation-report-app
+          npm ci
+          npm run typecheck
+          npm run test:unit
+          cd ..
+          git diff --check
+
+      - name: Commit verified read bridge
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add product-operation-report-app/src/renderer/src/store.ts
+          git commit -m 'refactor: read runtime task state through canonical bridge'
+          git push origin HEAD:phase1a/task-record-read-bridge
