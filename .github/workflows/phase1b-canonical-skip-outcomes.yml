@@ -1,0 +1,48 @@
+name: Phase1B canonical skip outcomes
+
+on:
+  push:
+    branches:
+      - phase1b/canonical-skip-outcomes
+    paths:
+      - '.github/workflows/phase1b-canonical-skip-outcomes.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: phase1b/canonical-skip-outcomes
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: product-operation-report-app/package-lock.json
+
+      - name: Apply canonical skip outcome refactor and verify
+        shell: bash
+        run: |
+          set -euo pipefail
+          python .github/scripts/phase1b-canonical-skip-outcomes.py
+          cd product-operation-report-app
+          npm ci
+          npm run typecheck
+          npm run test:unit
+          cd ..
+          git diff --check
+
+      - name: Commit verified skip outcome changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add product-operation-report-app/src/renderer/src/store.ts
+          git commit -m 'refactor: record skipped modules as canonical insufficient outcomes'
+          git push origin HEAD:phase1b/canonical-skip-outcomes
