@@ -368,8 +368,8 @@ function validateVocGroups(value: string): string[] {
     const section = value.slice(start, end < 0 ? value.length : end)
     const itemMatches = [...section.matchAll(/^#{0,6}\s*TOP\s*(\d{1,2})\s*$/gimu)]
     const ranks = itemMatches.map((match) => Number(match[1]))
-    if (ranks.length !== 10 || ranks.some((rank, rankIndex) => rank !== rankIndex + 1)) {
-      errors.push(`${group.heading}必须完整包含TOP1-TOP10`)
+    if (ranks.length < 1 || ranks.length > 10 || ranks.some((rank, rankIndex) => rank !== rankIndex + 1)) {
+      errors.push(`${group.heading}必须包含连续的TOP1-TOPN，且N不得超过10`)
     }
     const missingFields = new Set<string>()
     for (let itemIndex = 0; itemIndex < itemMatches.length; itemIndex++) {
@@ -466,7 +466,10 @@ export function validateModuleOutput(
   if (key === 'voc') errors.push(...validateVocGroups(value))
   if (key === 'selling-point-ranking' && engineVersion === 'v1' && !/TOP\s*10|TOP1|核心主卖点/iu.test(value)) errors.push('卖点排序缺少TOP10或分档')
   if (key === 'audience-sp-scene') {
-    if (!ordered(value, ['TOP1', 'TOP2', 'TOP3', 'TOP4', 'TOP5'])) errors.push('人群卖点场景模块缺少TOP1-TOP5')
+    const sceneRanks = [...value.matchAll(/^#{0,6}\s*TOP\s*(\d{1,2})(?:\s*[｜|].*)?$/gimu)].map((match) => Number(match[1]))
+    if (sceneRanks.length < 1 || sceneRanks.length > 5 || sceneRanks.some((rank, index) => rank !== index + 1)) {
+      errors.push('人群卖点场景模块必须包含连续的TOP1-TOPN，且N不得超过5')
+    }
     for (const requirement of [
       { label: '核心人群', pattern: /核心人群/u },
       { label: '核心卖点', pattern: /核心卖点/u },
@@ -497,7 +500,7 @@ export function moduleValidationRetryInstruction(
   const vocRequirements = module.key === 'voc'
     ? [
         '必须一次性完整输出以下四组，顺序和名称不得改变：1. 隐形需求 TOP10；2. 购买顾虑 TOP10；3. 高频问题 TOP10；4. 正向反馈 TOP10。',
-        '每组必须有TOP1到TOP10共10条，不能只输出第一组。',
+        '四组都必须输出；每组根据现有证据输出TOP1到TOPN，N为1-10。不能只输出第一组；不足10条时必须少输出，禁止为了凑满TOP10编造内容。',
         '隐形需求每条包含需求、频次、占比、来源分布、代表原话、来源；购买顾虑将需求改为顾虑；高频问题改为问题；正向反馈改为反馈，并额外包含认可类型、认可价值。',
         'TOP只表示排序，不得作为需求词、顾虑词、问题词或反馈词。',
         '没有可靠统计时必须写“频次：无精确频次｜占比无法计算”，不得虚构数字。'
