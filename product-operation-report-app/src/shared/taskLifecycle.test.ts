@@ -98,4 +98,20 @@ describe('canonical task lifecycle', () => {
       resultStatus: 'STALE'
     })).toThrow(/VALID、INSUFFICIENT 或 INVALID/u)
   })
+
+  it('rejects time travel and completion-only metadata on non-completion states', () => {
+    const pending = createPendingTaskRecord({ id: 'task:a', kind: 'MODULE_ANALYSIS' }, '2026-08-30T08:20:00.000Z')
+    const ready = transitionTaskExecution(pending, 'READY', '2026-08-30T08:21:00.000Z')
+
+    expect(() => transitionTaskExecution(ready, 'RUNNING', '2026-08-30T08:20:59.000Z')).toThrow(/不能早于当前 updatedAt/u)
+    expect(() => transitionTaskExecution(ready, 'RUNNING', '2026-08-30T08:22:00.000Z', {
+      outputRef: 'blob:not-allowed'
+    })).toThrow(/不能携带 outputRef/u)
+    expect(() => transitionTaskExecution(ready, 'PAUSED', '2026-08-30T08:22:00.000Z', {
+      resultFingerprint: 'result:not-allowed'
+    })).toThrow(/不能携带 resultFingerprint/u)
+    expect(() => transitionTaskExecution(ready, 'PAUSED', '2026-08-30T08:22:00.000Z', {
+      retryAt: '2026-08-30T08:30:00.000Z'
+    })).toThrow(/不能携带 retryAt/u)
+  })
 })
