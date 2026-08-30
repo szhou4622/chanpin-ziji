@@ -57,6 +57,16 @@ Known current conflicts to fix after Phase 0:
 - M5 VOC prompt allows fewer than TOP10, but current validator/tests can force TOP10.
 - M6 prompt allows fewer than TOP5, but current validator can force TOP5.
 
+## Known current policy drift
+
+These are confirmed production-facing inconsistencies in the imported v1.1.1 baseline and must not be treated as the canonical rule:
+
+- `ConversationPanel.tsx` welcome copy groups ZIP with regular files and says 40 MB; canonical ZIP limit is 120 MB.
+- `ConversationPanel.tsx` source-list hint says information type is optional even though generation requires `kindV1`; canonical source kind/category is required.
+- `sourceCleanCache.ts` currently truncates `source.note` to 4,000 characters before computing the cache key, while analysis input can carry a longer note. Cache identity must eventually use the exact accepted task input (or a single explicit ProductPolicy note limit).
+
+Fix these as small, isolated consistency changes with regression coverage; do not use them as a reason to broaden Phase 0 into Task Engine or prompt redesign.
+
 ## Package manager
 
 Current release CI uses `npm ci`; npm/package-lock is the current canonical production path. Do not introduce dependency churn during Phase 0.
