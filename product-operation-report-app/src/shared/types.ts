@@ -548,8 +548,10 @@ export interface SavedProject {
   cleanedData: string
   cleanDetails: ProjectCleanDetailSnapshot[]
   artifacts: Record<number, string>
-  /** Incremental checkpoints used to resume only unfinished model batches after a crash. */
+  /** Incremental checkpoints used by the current production runtime. */
   taskJournal?: Record<string, ProjectTaskSnapshot>
+  /** Phase 1A deterministic projection of taskJournal into the canonical task domain model. */
+  taskRecords?: Record<string, import('./taskModel').TaskRecord>
   reportMarkdown: string
   reportStale: boolean
   phase: ProjectPhase
