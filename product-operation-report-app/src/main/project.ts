@@ -27,6 +27,7 @@ import type {
   SourceKindV1
 } from '../shared/types'
 import { reconcileTaskRecordMirror, sanitizeTaskRecords } from '../shared/taskModel'
+import { sanitizeTaskCurrentIndex } from '../shared/taskCurrentIndex'
 
 type PlainRecord = Record<string, unknown>
 
@@ -446,6 +447,7 @@ function sanitizeProject(value: unknown): SavedProject {
   const input = isPlainObject(value) ? value : {}
   const taskJournal = sanitizeTaskJournal(input.taskJournal)
   const taskRecords = reconcileTaskRecordMirror(taskJournal, sanitizeTaskRecords(input.taskRecords))
+  const currentTaskByLogicalKey = sanitizeTaskCurrentIndex(input.currentTaskByLogicalKey, taskRecords)
   return {
     revision: sanitizeRevision(input.revision),
     analysisSessionId: typeof input.analysisSessionId === 'string' && /^[\w.:@/+-]{1,240}$/u.test(input.analysisSessionId)
@@ -470,6 +472,7 @@ function sanitizeProject(value: unknown): SavedProject {
     artifacts: sanitizeArtifactRecord(input.artifacts),
     taskJournal,
     taskRecords,
+    currentTaskByLogicalKey,
     reportMarkdown: asString(input.reportMarkdown),
     reportStale: Boolean(input.reportStale),
     phase: sanitizePhase(input.phase),
