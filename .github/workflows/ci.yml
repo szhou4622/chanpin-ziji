@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   quality:
-    name: Typecheck, tests and build
+    name: Typecheck, unit tests and build
     runs-on: ubuntu-latest
     timeout-minutes: 30
     defaults:
@@ -44,19 +44,30 @@ jobs:
       - name: Run unit tests
         run: npm run test:unit
 
-      - name: Prepare Electron sandbox for regression
-        shell: bash
-        run: |
-          set -euo pipefail
-          node -e "console.log(require('electron'))"
-          sandbox="node_modules/electron/dist/chrome-sandbox"
-          test -f "${sandbox}"
-          sudo chown root:root "${sandbox}"
-          sudo chmod 4755 "${sandbox}"
-          stat -c '%U %G %a %n' "${sandbox}"
-
-      - name: Run core regression suite
-        run: xvfb-run -a npm run test:regression
-
       - name: Build application
         run: npm run build
+
+  windows-regression:
+    name: Windows Electron regression
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: product-operation-report-app
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: product-operation-report-app/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run core regression suite
+        run: npm run test:regression
