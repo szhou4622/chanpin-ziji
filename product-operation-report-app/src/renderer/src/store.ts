@@ -37,6 +37,7 @@ import { buildProjectSnapshot } from './store/persistence'
 import { mergeRevisionParts, runFinalReportInParts, runModelRetry, selectRevisionParts } from './store/analysis'
 import { isTemporaryReservationContention, planCleaningConcurrency } from './store/cleaning'
 import { readRuntimeTaskState, removeRuntimeTaskState, writeRuntimeTaskState } from './store/taskJournalAdapter'
+import { completeModuleAsInsufficient } from './store/moduleOutcome'
 import {
   buildCleaningPlan,
   type CleaningMethod,
@@ -2459,15 +2460,38 @@ export const useStore = create<StoreState>((set, get) => ({
     const moduleByKey = new Map(REPORT_MODULES.map((module) => [module.key, module]))
     const runModule = async (module: typeof REPORT_MODULES[number]): Promise<void> => {
       if (!isCurrentSession()) return
-      const skippedReason = sufficiency.skipped.get(module.key)
-      if (skippedReason) {
-        updateModuleState(module.key, { status: 'skipped', message: skippedReason, updatedAt: new Date().toISOString() })
-        return
-      }
       const savedTaskId = `${sessionId}:module:v2:${module.key}`
       const savedState = readRuntimeTaskState(get().taskJournal, get().taskRecords, savedTaskId)
       const saved = savedState.journal
       const savedTask = savedState.task
+      const completeAsInsufficient = async (message: string, inputFingerprint?: string): Promise<string> => {
+        const updatedAt = new Date().toISOString()
+        let output = message
+        set((state) => {
+          const outcome = completeModuleAsInsufficient(
+            state.taskJournal,
+            state.taskRecords,
+            savedTaskId,
+            module.key,
+            message,
+            updatedAt,
+            inputFingerprint
+          )
+          output = outcome.output
+          return {
+            taskJournal: outcome.taskJournal,
+            taskRecords: outcome.taskRecords,
+            moduleStates: { ...state.moduleStates, [module.key]: outcome.moduleState }
+          }
+        })
+        await window.api.saveLastProject(buildProjectSnapshot(get()))
+        return output
+      }
+      const skippedReason = sufficiency.skipped.get(module.key)
+      if (skippedReason) {
+        await completeAsInsufficient(skippedReason)
+        return
+      }
       const outsideTargetedRetry = get().moduleRetryScope.length > 0 && !get().moduleRetryScope.includes(module.key)
       if (outsideTargetedRetry) {
         const retained = get().artifacts[module.id]
@@ -2480,7 +2504,10 @@ export const useStore = create<StoreState>((set, get) => ({
           })
           return
         }
-        if (retainedState?.status === 'skipped') return
+        if (retainedState?.status === 'skipped') {
+          if (!savedTask && retainedState.message) await completeAsInsufficient(retainedState.message)
+          return
+        }
       }
       const moduleSources = analysisSources.flatMap((source) => {
         if (!source.kindV1 || !module.requiredSources.includes(source.kindV1)) return []
@@ -2494,7 +2521,7 @@ export const useStore = create<StoreState>((set, get) => ({
       })
       if (module.dependsOn.length > 0 && module.requiredSources.length === 0 && upstream.length === 0) {
         const message = `暂无分析：缺少${module.dependsOn.map((key) => moduleByTitle(key)).join('、')}的可用结果。`
-        updateModuleState(module.key, { status: 'skipped', message, updatedAt: new Date().toISOString() })
+        await completeAsInsufficient(message)
         return
       }
       updateModuleState(module.key, { status: 'running', updatedAt: new Date().toISOString() })
@@ -2532,7 +2559,7 @@ export const useStore = create<StoreState>((set, get) => ({
       }
       if (module.key === 'benchmark-brands') {
         const message = '暂无分析：对标联网模块仅保留为旧版兼容，不参与v2六模块分析。'
-        updateModuleState(module.key, { status: 'skipped', message, updatedAt: new Date().toISOString() })
+        await completeAsInsufficient(message)
         return
       }
       const moduleTaskContext = {
@@ -2614,15 +2641,7 @@ export const useStore = create<StoreState>((set, get) => ({
         return
       }
       if (isNoAnalysisOutput(moduleOutput)) {
-        const output = normalizeNoAnalysisOutput(moduleOutput)
-        set((state) => ({
-          ...writeRuntimeTaskState(state.taskJournal, state.taskRecords, savedTaskId, {
-            kind: 'module', status: 'complete', output, inputFingerprint,
-            resultStatus: 'INSUFFICIENT', moduleKey: module.key
-          })
-        }))
-        updateModuleState(module.key, { status: 'skipped', message: output, updatedAt: new Date().toISOString() })
-        await window.api.saveLastProject(buildProjectSnapshot(get()))
+        await completeAsInsufficient(normalizeNoAnalysisOutput(moduleOutput), inputFingerprint)
         return
       }
       set((state) => ({
