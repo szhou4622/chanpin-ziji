@@ -103,10 +103,12 @@ test = Path('product-operation-report-app/src/shared/taskModel.test.ts')
 text = test.read_text(encoding='utf-8')
 text = replace_once(
     text,
-    """      id: 'session:module:v2:voc',
+    """    const valid = succeededTask({
+      id: 'session:module:v2:voc',
       resultStatus: 'INSUFFICIENT',
 """,
-    """      id: 'session:module:v2:voc@run-a',
+    """    const valid = succeededTask({
+      id: 'session:module:v2:voc@run-a',
       logicalKey: 'session:module:v2:voc',
       payloadKey: 'session:module:v2:voc',
       resultStatus: 'INSUFFICIENT',
