@@ -111,6 +111,140 @@ const LEGACY_EXECUTION_MAP: Record<ProjectTaskSnapshot['status'], TaskExecutionS
   interrupted: 'PAUSED'
 }
 
+const TASK_ID_PATTERN = /^[\w.:@/+-]{1,300}$/u
+const MODULE_KEYS = new Set<ModuleKey>([
+  'product-info',
+  'platform-audience',
+  'material-review',
+  'benchmark-brands',
+  'selling-points',
+  'voc',
+  'selling-point-ranking',
+  'audience-sp-scene'
+])
+const EXECUTION_STATUS_SET = new Set<string>(TASK_EXECUTION_STATUSES)
+const RESULT_STATUS_SET = new Set<string>(TASK_RESULT_STATUSES)
+const TASK_KIND_SET = new Set<string>(TASK_KINDS)
+
+type PlainRecord = Record<string, unknown>
+
+function isPlainObject(value: unknown): value is PlainRecord {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+function validDate(value: unknown): value is string {
+  return typeof value === 'string' && Number.isFinite(Date.parse(value))
+}
+
+function boundedString(value: unknown, max: number): string | undefined {
+  return typeof value === 'string' && value.length > 0 && value.length <= max ? value : undefined
+}
+
+function optionalDate(value: unknown): string | undefined | null {
+  if (value === undefined) return undefined
+  return validDate(value) ? value : null
+}
+
+function sanitizeDependencies(value: unknown): TaskDependencySnapshot[] | null {
+  if (!Array.isArray(value) || value.length > 64) return null
+  const result: TaskDependencySnapshot[] = []
+  const seen = new Set<string>()
+  for (const item of value) {
+    if (!isPlainObject(item)) return null
+    const taskId = boundedString(item.taskId, 300)
+    const resultFingerprint = boundedString(item.resultFingerprint, 2_000)
+    if (!taskId || !TASK_ID_PATTERN.test(taskId) || !resultFingerprint || seen.has(taskId)) return null
+    seen.add(taskId)
+    result.push({ taskId, resultFingerprint })
+  }
+  return result
+}
+
+function sanitizeInvalidation(value: unknown): TaskInvalidation | undefined | null {
+  if (value === undefined) return undefined
+  if (!isPlainObject(value)) return null
+  const reason = boundedString(value.reason, 1_000)
+  const invalidatedAt = validDate(value.invalidatedAt) ? value.invalidatedAt : undefined
+  const invalidatedBy = value.invalidatedBy === undefined ? undefined : boundedString(value.invalidatedBy, 300)
+  if (!reason || !invalidatedAt || (value.invalidatedBy !== undefined && !invalidatedBy)) return null
+  return { reason, invalidatedAt, invalidatedBy }
+}
+
+/**
+ * Strictly validates persisted canonical task metadata. Invalid records are dropped
+ * so a corrupt or hand-edited project cannot become authoritative task state.
+ */
+export function sanitizeTaskRecords(value: unknown): Record<string, TaskRecord> {
+  if (!isPlainObject(value)) return {}
+  const result: Record<string, TaskRecord> = {}
+  for (const [taskId, raw] of Object.entries(value)) {
+    if (!TASK_ID_PATTERN.test(taskId) || !isPlainObject(raw)) continue
+    if (raw.schemaVersion !== 1 || raw.id !== taskId) continue
+    if (typeof raw.kind !== 'string' || !TASK_KIND_SET.has(raw.kind)) continue
+    if (typeof raw.executionStatus !== 'string' || !EXECUTION_STATUS_SET.has(raw.executionStatus)) continue
+    const executionStatus = raw.executionStatus as TaskExecutionStatus
+    const resultStatus = raw.resultStatus === undefined
+      ? undefined
+      : typeof raw.resultStatus === 'string' && RESULT_STATUS_SET.has(raw.resultStatus)
+        ? raw.resultStatus as TaskResultStatus
+        : null
+    if (resultStatus === null) continue
+    if (executionStatus === 'SUCCEEDED' ? !resultStatus : Boolean(resultStatus)) continue
+    const dependencies = sanitizeDependencies(raw.dependencies)
+    if (!dependencies) continue
+    if (!Number.isSafeInteger(raw.attemptCount) || Number(raw.attemptCount) < 0 || Number(raw.attemptCount) > 10_000) continue
+    if (!validDate(raw.createdAt) || !validDate(raw.updatedAt)) continue
+    const startedAt = optionalDate(raw.startedAt)
+    const endedAt = optionalDate(raw.endedAt)
+    const retryAt = optionalDate(raw.retryAt)
+    if (startedAt === null || endedAt === null || retryAt === null) continue
+    const inputFingerprint = raw.inputFingerprint === undefined ? undefined : boundedString(raw.inputFingerprint, 2_000)
+    const resultFingerprint = raw.resultFingerprint === undefined ? undefined : boundedString(raw.resultFingerprint, 2_000)
+    const sourceId = raw.sourceId === undefined ? undefined : boundedString(raw.sourceId, 300)
+    const errorClass = raw.errorClass === undefined ? undefined : boundedString(raw.errorClass, 200)
+    const outputRef = raw.outputRef === undefined ? undefined : boundedString(raw.outputRef, 1_000)
+    if (
+      (raw.inputFingerprint !== undefined && !inputFingerprint) ||
+      (raw.resultFingerprint !== undefined && !resultFingerprint) ||
+      (raw.sourceId !== undefined && !sourceId) ||
+      (raw.errorClass !== undefined && !errorClass) ||
+      (raw.outputRef !== undefined && !outputRef)
+    ) continue
+    const moduleKey = raw.moduleKey === undefined
+      ? undefined
+      : typeof raw.moduleKey === 'string' && MODULE_KEYS.has(raw.moduleKey as ModuleKey)
+        ? raw.moduleKey as ModuleKey
+        : null
+    if (moduleKey === null) continue
+    const invalidation = sanitizeInvalidation(raw.invalidation)
+    if (invalidation === null) continue
+    if (raw.migratedFromLegacy !== undefined && typeof raw.migratedFromLegacy !== 'boolean') continue
+    result[taskId] = {
+      schemaVersion: 1,
+      id: taskId,
+      kind: raw.kind as TaskKind,
+      executionStatus,
+      resultStatus,
+      dependencies,
+      inputFingerprint,
+      resultFingerprint,
+      sourceId,
+      moduleKey,
+      attemptCount: Number(raw.attemptCount),
+      errorClass,
+      retryAt,
+      outputRef,
+      invalidation,
+      createdAt: raw.createdAt,
+      updatedAt: raw.updatedAt,
+      startedAt,
+      endedAt,
+      migratedFromLegacy: raw.migratedFromLegacy as boolean | undefined
+    }
+  }
+  return result
+}
+
 export interface LegacyTaskProjection {
   task: TaskRecord
   /** Retained separately until Artifact/Blob references replace legacy inline outputs. */
@@ -141,16 +275,31 @@ export function projectLegacyTaskSnapshot(taskId: string, snapshot: ProjectTaskS
   }
 }
 
-/**
- * Reuse is an identity decision, not a timestamp decision.
- * INSUFFICIENT is reusable when the exact inputs are unchanged because "no more evidence" is itself a valid result.
- */
 export function projectLegacyTaskJournal(
   journal: Readonly<Record<string, ProjectTaskSnapshot>>
 ): Record<string, TaskRecord> {
   return Object.fromEntries(
     Object.entries(journal).map(([taskId, snapshot]) => [taskId, projectLegacyTaskSnapshot(taskId, snapshot).task])
   )
+}
+
+/**
+ * During the dual-write bridge the journal remains the read authority. Persisted
+ * canonical records are accepted only for journal tasks with the exact same
+ * updatedAt, proving both sides came from the same logical mutation.
+ */
+export function reconcileTaskRecordMirror(
+  journal: Readonly<Record<string, ProjectTaskSnapshot>>,
+  persisted: Readonly<Record<string, TaskRecord>>
+): Record<string, TaskRecord> {
+  const projected = projectLegacyTaskJournal(journal)
+  for (const [taskId, snapshot] of Object.entries(journal)) {
+    const canonical = persisted[taskId]
+    if (canonical && canonical.id === taskId && canonical.updatedAt === snapshot.updatedAt) {
+      projected[taskId] = canonical
+    }
+  }
+  return projected
 }
 
 export function isReusableTaskResult(task: TaskRecord, expectedInputFingerprint: string): boolean {
