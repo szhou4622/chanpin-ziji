@@ -192,7 +192,7 @@ export function sanitizeTaskRecords(value: unknown): Record<string, TaskRecord> 
     if (executionStatus === 'SUCCEEDED' ? !resultStatus : Boolean(resultStatus)) continue
     const dependencies = sanitizeDependencies(raw.dependencies)
     if (!dependencies) continue
-    if (!Number.isSafeInteger(raw.attemptCount) || Number(raw.attemptCount) < 0 || Number(raw.attemptCount) > 10_000) continue
+    if (typeof raw.attemptCount !== 'number' || !Number.isSafeInteger(raw.attemptCount) || raw.attemptCount < 0 || raw.attemptCount > 10_000) continue
     if (!validDate(raw.createdAt) || !validDate(raw.updatedAt)) continue
     const startedAt = optionalDate(raw.startedAt)
     const endedAt = optionalDate(raw.endedAt)

@@ -26,7 +26,7 @@ import type {
   ModuleRunState,
   SourceKindV1
 } from '../shared/types'
-import { projectLegacyTaskJournal } from '../shared/taskModel'
+import { reconcileTaskRecordMirror, sanitizeTaskRecords } from '../shared/taskModel'
 
 type PlainRecord = Record<string, unknown>
 
@@ -445,6 +445,7 @@ function sanitizeModuleStates(value: unknown): Partial<Record<ModuleKey, ModuleR
 function sanitizeProject(value: unknown): SavedProject {
   const input = isPlainObject(value) ? value : {}
   const taskJournal = sanitizeTaskJournal(input.taskJournal)
+  const taskRecords = reconcileTaskRecordMirror(taskJournal, sanitizeTaskRecords(input.taskRecords))
   return {
     revision: sanitizeRevision(input.revision),
     analysisSessionId: typeof input.analysisSessionId === 'string' && /^[\w.:@/+-]{1,240}$/u.test(input.analysisSessionId)
@@ -468,7 +469,7 @@ function sanitizeProject(value: unknown): SavedProject {
       : [],
     artifacts: sanitizeArtifactRecord(input.artifacts),
     taskJournal,
-    taskRecords: projectLegacyTaskJournal(taskJournal),
+    taskRecords,
     reportMarkdown: asString(input.reportMarkdown),
     reportStale: Boolean(input.reportStale),
     phase: sanitizePhase(input.phase),
