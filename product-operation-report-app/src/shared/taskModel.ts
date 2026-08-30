@@ -145,6 +145,14 @@ export function projectLegacyTaskSnapshot(taskId: string, snapshot: ProjectTaskS
  * Reuse is an identity decision, not a timestamp decision.
  * INSUFFICIENT is reusable when the exact inputs are unchanged because "no more evidence" is itself a valid result.
  */
+export function projectLegacyTaskJournal(
+  journal: Readonly<Record<string, ProjectTaskSnapshot>>
+): Record<string, TaskRecord> {
+  return Object.fromEntries(
+    Object.entries(journal).map(([taskId, snapshot]) => [taskId, projectLegacyTaskSnapshot(taskId, snapshot).task])
+  )
+}
+
 export function isReusableTaskResult(task: TaskRecord, expectedInputFingerprint: string): boolean {
   return (
     task.executionStatus === 'SUCCEEDED' &&

@@ -4,6 +4,7 @@ import {
   dependenciesMatch,
   invalidateTaskResult,
   isReusableTaskResult,
+  projectLegacyTaskJournal,
   projectLegacyTaskSnapshot,
   type TaskRecord
 } from './taskModel'
@@ -67,6 +68,33 @@ describe('task domain model', () => {
       'module:m4': 'm4:v4',
       'module:m5': 'm5:v2'
     })).toBe(false)
+  })
+
+  it('projects a sanitized legacy journal into canonical task records without carrying large outputs', () => {
+    const journal: Record<string, ProjectTaskSnapshot> = {
+      'clean:source-a': {
+        kind: 'source_clean',
+        status: 'complete',
+        output: '大段旧清洗结果不应复制进TaskRecord',
+        inputFingerprint: 'clean-input',
+        updatedAt: '2026-08-20T02:00:00.000Z'
+      },
+      'module:m5': {
+        kind: 'module',
+        status: 'interrupted',
+        updatedAt: '2026-08-20T02:01:00.000Z'
+      }
+    }
+    const projected = projectLegacyTaskJournal(journal)
+    expect(projected['clean:source-a']).toMatchObject({
+      kind: 'SOURCE_CLEAN',
+      executionStatus: 'SUCCEEDED',
+      resultStatus: 'VALID',
+      inputFingerprint: 'clean-input',
+      migratedFromLegacy: true
+    })
+    expect(projected['module:m5'].executionStatus).toBe('PAUSED')
+    expect('legacyOutput' in projected['clean:source-a']).toBe(false)
   })
 
   it('projects legacy task journal records deterministically without rewriting inline output', () => {

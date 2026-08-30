@@ -1,6 +1,6 @@
 # Task Domain Model
 
-Phase 1A introduces the canonical task vocabulary only. It does **not** replace the current scheduler/request pipeline yet.
+Phase 1A introduces the canonical task vocabulary and a compatibility persistence bridge. It does **not** replace the current scheduler/request pipeline yet.
 
 ## Task vs Attempt
 
@@ -104,6 +104,21 @@ Legacy inline output is preserved separately. Migration never invokes a model an
 
 Legacy attempt count is unknown, so the compatibility projection uses `attemptCount = 0` as an explicit migration sentinel; native Task Engine records will count real attempts.
 
+## Phase 1A persistence bridge authority
+
+During the compatibility bridge, the current production runtime still writes `taskJournal`.
+
+On save/load, the sanitized journal is projected deterministically into `taskRecords` and both are persisted. The projected `taskRecords` are therefore a **read-only compatibility mirror**, not yet an independent source of truth.
+
+This is intentional:
+
+- old projects remain recoverable without model work;
+- current runtime behavior does not change;
+- large legacy output text is not duplicated into `TaskRecord`;
+- corrupt or arbitrary persisted `taskRecords` are not trusted as authoritative state during this bridge.
+
+When native TaskRecord writers are introduced, authority must switch explicitly in one migration step: canonical records must receive strict sanitization and become the write source of truth. Do not leave `taskJournal` and native `taskRecords` as long-lived competing writers, and do not silently overwrite native records with a legacy projection.
+
 ## Storage boundary
 
 `TaskRecord` stores task metadata and references (`outputRef`), not large report/source/model text.
@@ -118,6 +133,7 @@ Phase 1A does not introduce SQLite.
 
 ## Not implemented in Phase 1A
 
+- native TaskRecord writer authority
 - Scheduler
 - Admission Engine
 - Retry Policy
