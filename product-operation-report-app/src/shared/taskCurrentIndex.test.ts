@@ -51,6 +51,17 @@ describe('current task index', () => {
     expect(replaced.taskRecords[second.id].executionStatus).toBe('PENDING')
   })
 
+  it('is idempotent for the same persisted task identity but rejects an id collision', () => {
+    const first = pending('slot:voc@a', 'slot:voc')
+    const restoredCopy = { ...first }
+    const registered = registerCurrentTask({ [first.id]: first }, {}, restoredCopy)
+    expect(registered.currentIndex['slot:voc']).toBe(first.id)
+    expect(registered.taskRecords[first.id]).toBe(first)
+
+    const collision = { ...first, inputFingerprint: 'different-input' }
+    expect(() => registerCurrentTask({ [first.id]: first }, {}, collision)).toThrow(/身份不一致/u)
+  })
+
   it('sanitizes persisted pointers and drops missing or cross-slot references', () => {
     const task = pending('slot:voc@a', 'slot:voc')
     const sanitized = sanitizeTaskCurrentIndex({
