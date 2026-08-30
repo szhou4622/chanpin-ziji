@@ -1,0 +1,29 @@
+name: Phase1B task lifecycle verify
+
+on:
+  push:
+    branches:
+      - phase1b/task-lifecycle-state-machine
+    paths:
+      - '.github/workflows/phase1b-task-lifecycle-verify.yml'
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: phase1b/task-lifecycle-state-machine
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: product-operation-report-app/package-lock.json
+      - name: Verify lifecycle state machine
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd product-operation-report-app
+          npm ci
+          npm run typecheck
+          npm run test:unit
