@@ -185,6 +185,25 @@ async function testProjectRevisionAndBackup(): Promise<void> {
   const billingSnapshot = { ...snapshot(6, 'billing-id'), analysisSessionId: 'stable-billing-session' }
   await saveLastProject(billingSnapshot)
   assert.equal((await loadLastProject())?.analysisSessionId, 'stable-billing-session', 'crash recovery preserves stable billing ids')
+  const taskBridgeSnapshot: SavedProject = {
+    ...snapshot(7, ''),
+    taskJournal: {
+      'module:voc:legacy': {
+        kind: 'module',
+        status: 'complete',
+        output: '旧VOC结果',
+        inputFingerprint: 'voc-input-v1',
+        updatedAt: '2026-08-20T03:00:00.000Z'
+      }
+    }
+  }
+  await saveLastProject(taskBridgeSnapshot)
+  const restoredTaskBridge = await loadLastProject()
+  assert.equal(restoredTaskBridge?.taskJournal?.['module:voc:legacy']?.output, '旧VOC结果', 'legacy task journal output remains recoverable')
+  assert.equal(restoredTaskBridge?.taskRecords?.['module:voc:legacy']?.kind, 'MODULE_ANALYSIS', 'legacy journal projects into canonical task kind')
+  assert.equal(restoredTaskBridge?.taskRecords?.['module:voc:legacy']?.executionStatus, 'SUCCEEDED', 'legacy complete task projects to SUCCEEDED')
+  assert.equal(restoredTaskBridge?.taskRecords?.['module:voc:legacy']?.resultStatus, 'VALID', 'legacy complete task projects to VALID')
+  assert.equal(restoredTaskBridge?.taskRecords?.['module:voc:legacy']?.inputFingerprint, 'voc-input-v1', 'task input identity survives project persistence')
   const migratedSnapshot: SavedProject = {
     ...snapshot(7, '# 产品与内容经营报告'),
     engineVersion: 'v2',
