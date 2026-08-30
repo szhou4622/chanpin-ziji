@@ -74,7 +74,9 @@ describe('task domain model', () => {
 
   it('strictly sanitizes persisted canonical records and drops malformed state', () => {
     const valid = succeededTask({
-      id: 'session:module:v2:voc',
+      id: 'session:module:v2:voc@run-a',
+      logicalKey: 'session:module:v2:voc',
+      payloadKey: 'session:module:v2:voc',
       resultStatus: 'INSUFFICIENT',
       updatedAt: '2026-08-30T03:00:00.000Z',
       createdAt: '2026-08-30T02:59:00.000Z',
@@ -85,7 +87,9 @@ describe('task domain model', () => {
       'bad:id-mismatch': { ...valid, id: 'another-id' },
       'bad:failed-with-result': { ...valid, id: 'bad:failed-with-result', executionStatus: 'FAILED', resultStatus: 'VALID' },
       'bad:date': { ...valid, id: 'bad:date', updatedAt: 'not-a-date' },
-      'bad:module': { ...valid, id: 'bad:module', moduleKey: 'made-up-module' }
+      'bad:module': { ...valid, id: 'bad:module', moduleKey: 'made-up-module' },
+      'bad:logical': { ...valid, id: 'bad:logical', logicalKey: 'bad logical key' },
+      'bad:payload': { ...valid, id: 'bad:payload', payloadKey: 'bad payload key' }
     })
 
     expect(sanitized).toEqual({ [valid.id]: valid })
@@ -197,6 +201,8 @@ describe('task domain model', () => {
     const projected = projectLegacyTaskSnapshot('legacy:module:5', complete)
     expect(projected.task).toMatchObject({
       id: 'legacy:module:5',
+      logicalKey: 'legacy:module:5',
+      payloadKey: 'legacy:module:5',
       kind: 'MODULE_ANALYSIS',
       executionStatus: 'SUCCEEDED',
       resultStatus: 'VALID',

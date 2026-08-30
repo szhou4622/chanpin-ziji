@@ -1,3 +1,4 @@
+import { isValidTaskIdentityKey } from './taskIdentity'
 import type { ModuleKey, ProjectTaskSnapshot } from './types'
 
 export const TASK_EXECUTION_STATUSES = [
@@ -56,7 +57,12 @@ export interface TaskInvalidation {
  */
 export interface TaskRecord {
   schemaVersion: 1
+  /** Immutable id of this logical-task instance. */
   id: string
+  /** Stable business slot shared by replacement task instances. */
+  logicalKey?: string
+  /** Transitional key of the legacy payload carrier while journal output still exists. */
+  payloadKey?: string
   kind: TaskKind
   executionStatus: TaskExecutionStatus
   resultStatus?: TaskResultStatus
@@ -111,7 +117,6 @@ const LEGACY_EXECUTION_MAP: Record<ProjectTaskSnapshot['status'], TaskExecutionS
   interrupted: 'PAUSED'
 }
 
-const TASK_ID_PATTERN = /^[\w.:@/+-]{1,300}$/u
 const MODULE_KEYS = new Set<ModuleKey>([
   'product-info',
   'platform-audience',
@@ -153,7 +158,7 @@ function sanitizeDependencies(value: unknown): TaskDependencySnapshot[] | null {
     if (!isPlainObject(item)) return null
     const taskId = boundedString(item.taskId, 300)
     const resultFingerprint = boundedString(item.resultFingerprint, 2_000)
-    if (!taskId || !TASK_ID_PATTERN.test(taskId) || !resultFingerprint || seen.has(taskId)) return null
+    if (!taskId || !isValidTaskIdentityKey(taskId) || !resultFingerprint || seen.has(taskId)) return null
     seen.add(taskId)
     result.push({ taskId, resultFingerprint })
   }
@@ -178,7 +183,7 @@ export function sanitizeTaskRecords(value: unknown): Record<string, TaskRecord> 
   if (!isPlainObject(value)) return {}
   const result: Record<string, TaskRecord> = {}
   for (const [taskId, raw] of Object.entries(value)) {
-    if (!TASK_ID_PATTERN.test(taskId) || !isPlainObject(raw)) continue
+    if (!isValidTaskIdentityKey(taskId) || !isPlainObject(raw)) continue
     if (raw.schemaVersion !== 1 || raw.id !== taskId) continue
     if (typeof raw.kind !== 'string' || !TASK_KIND_SET.has(raw.kind)) continue
     if (typeof raw.executionStatus !== 'string' || !EXECUTION_STATUS_SET.has(raw.executionStatus)) continue
@@ -201,12 +206,16 @@ export function sanitizeTaskRecords(value: unknown): Record<string, TaskRecord> 
     const inputFingerprint = raw.inputFingerprint === undefined ? undefined : boundedString(raw.inputFingerprint, 2_000)
     const resultFingerprint = raw.resultFingerprint === undefined ? undefined : boundedString(raw.resultFingerprint, 2_000)
     const sourceId = raw.sourceId === undefined ? undefined : boundedString(raw.sourceId, 300)
+    const logicalKey = raw.logicalKey === undefined ? undefined : boundedString(raw.logicalKey, 300)
+    const payloadKey = raw.payloadKey === undefined ? undefined : boundedString(raw.payloadKey, 300)
     const errorClass = raw.errorClass === undefined ? undefined : boundedString(raw.errorClass, 200)
     const outputRef = raw.outputRef === undefined ? undefined : boundedString(raw.outputRef, 1_000)
     if (
       (raw.inputFingerprint !== undefined && !inputFingerprint) ||
       (raw.resultFingerprint !== undefined && !resultFingerprint) ||
       (raw.sourceId !== undefined && !sourceId) ||
+      (raw.logicalKey !== undefined && (!logicalKey || !isValidTaskIdentityKey(logicalKey))) ||
+      (raw.payloadKey !== undefined && (!payloadKey || !isValidTaskIdentityKey(payloadKey))) ||
       (raw.errorClass !== undefined && !errorClass) ||
       (raw.outputRef !== undefined && !outputRef)
     ) continue
@@ -222,6 +231,8 @@ export function sanitizeTaskRecords(value: unknown): Record<string, TaskRecord> 
     result[taskId] = {
       schemaVersion: 1,
       id: taskId,
+      logicalKey,
+      payloadKey,
       kind: raw.kind as TaskKind,
       executionStatus,
       resultStatus,
@@ -260,6 +271,8 @@ export function projectLegacyTaskSnapshot(taskId: string, snapshot: ProjectTaskS
     task: {
       schemaVersion: 1,
       id: taskId,
+      logicalKey: taskId,
+      payloadKey: taskId,
       kind: LEGACY_KIND_MAP[snapshot.kind],
       executionStatus,
       resultStatus: executionStatus === 'SUCCEEDED' ? 'VALID' : undefined,
