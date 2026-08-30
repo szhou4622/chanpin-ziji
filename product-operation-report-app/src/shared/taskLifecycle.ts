@@ -74,6 +74,9 @@ export function transitionTaskExecution(
   options: TaskTransitionOptions = {}
 ): TaskRecord {
   assertIsoDate(now, '任务状态时间')
+  if (Date.parse(now) < Date.parse(task.updatedAt)) {
+    throw new Error('任务状态时间不能早于当前 updatedAt')
+  }
   if (!ALLOWED_TRANSITIONS[task.executionStatus].has(nextStatus)) {
     throw new Error(`非法任务状态转换：${task.executionStatus} → ${nextStatus}`)
   }
@@ -84,14 +87,18 @@ export function transitionTaskExecution(
     if (Date.parse(options.retryAt) < Date.parse(now)) {
       throw new Error('WAITING_RETRY 的 retryAt 不能早于当前状态时间')
     }
+  } else if (options.retryAt) {
+    throw new Error(`${nextStatus} 不能携带 retryAt`)
   }
 
   if (nextStatus === 'SUCCEEDED') {
     if (!options.resultStatus || !COMPLETION_RESULT_STATUSES.has(options.resultStatus)) {
       throw new Error('SUCCEEDED 必须提供 VALID、INSUFFICIENT 或 INVALID 结果状态')
     }
-  } else if (options.resultStatus) {
-    throw new Error(`${nextStatus} 不能携带 resultStatus`)
+  } else {
+    if (options.resultStatus) throw new Error(`${nextStatus} 不能携带 resultStatus`)
+    if (options.resultFingerprint) throw new Error(`${nextStatus} 不能携带 resultFingerprint`)
+    if (options.outputRef) throw new Error(`${nextStatus} 不能携带 outputRef`)
   }
 
   const next: TaskRecord = {
