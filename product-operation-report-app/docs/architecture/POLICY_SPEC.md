@@ -52,21 +52,19 @@ If a safety limit means business material would be omitted, the system must not 
 
 Cardinality is a maximum, not a command to invent content. A validator must never require more items than the available evidence can support.
 
-Known current conflicts to fix after Phase 0:
+Resolved in Phase 0:
 
-- M5 VOC prompt allows fewer than TOP10, but current validator/tests can force TOP10.
-- M6 prompt allows fewer than TOP5, but current validator can force TOP5.
+- M5 VOC still requires all four fixed sections, but each section accepts continuous TOP1-TOPN with N=1..10. Repair instructions explicitly forbid filling to TOP10 without evidence.
+- M6 audience × selling point × scene accepts continuous TOP1-TOPN with N=1..5 instead of forcing five combinations.
 
-## Known current policy drift
+## Resolved policy drift
 
-These are confirmed production-facing inconsistencies in the imported v1.1.1 baseline and must not be treated as the canonical rule:
+The imported v1.1.1 baseline contained several conflicting product rules. Phase 0 aligned them with the canonical policy:
 
-- `ConversationPanel.tsx` welcome copy groups ZIP with regular files and says 40 MB; canonical ZIP limit is 120 MB.
-- `ConversationPanel.tsx` source-list hint says information type is optional even though generation requires `kindV1`; canonical source kind/category is required.
-- `sourceCleanCache.ts` currently truncates `source.note` to 4,000 characters before computing the cache key, while analysis input can carry a longer note. Cache identity must eventually use the exact accepted task input (or a single explicit ProductPolicy note limit).
-
-Fix these as small, isolated consistency changes with regression coverage; do not use them as a reason to broaden Phase 0 into Task Engine or prompt redesign.
+- Production upload copy now distinguishes regular files at 40 MB from ZIP at 120 MB.
+- Production source-list copy now states that source kind/category is required; platform and note remain optional.
+- `sourceCleanCacheKey()` now hashes the complete accepted `source.note`, so notes that differ after the first 4,000 characters cannot incorrectly share a cache identity. A regression test guards this behavior.
 
 ## Package manager
 
-Current release CI uses `npm ci`; npm/package-lock is the current canonical production path. Do not introduce dependency churn during Phase 0.
+Current release and daily CI use `npm ci`; npm/package-lock is the canonical production path. Unused pnpm lock/workspace files were removed and the package manager is declared in `package.json`. Do not introduce dependency churn during Phase 0.
