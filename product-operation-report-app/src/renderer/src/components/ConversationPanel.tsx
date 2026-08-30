@@ -220,7 +220,7 @@ export default function ConversationPanel(): JSX.Element {
             <div className="welcome-file-note">
               <strong>最多上传 50 份，资料总量不超过 350MB</strong>
               <span>图片：单张不超过 25MB</span>
-              <span>Excel/ODS/CSV/TSV、PDF、DOC/DOCX、PPTX、Markdown/TXT/RTF、JSON/YAML、HTML/XML、ZIP：单个不超过 40MB</span>
+              <span>Excel/ODS/CSV/TSV、PDF、DOC/DOCX、PPTX、Markdown/TXT/RTF、JSON/YAML、HTML/XML：单个不超过 40MB；ZIP：单个不超过 120MB</span>
               <span>TIFF/AVIF/HEIC 会在软件内自动转成图片；扫描 PDF 会自动逐页转图，不用用户手动转换</span>
             </div>
             <section className="source-guide" aria-labelledby="source-guide-title">
@@ -287,7 +287,7 @@ export default function ConversationPanel(): JSX.Element {
         )}
         {sources.length > 0 && (
           <>
-            <div className="src-tip">归属只能二选一：自有数据 / 竞品数据；平台、信息类型和补充说明都是选填。被忽略或解析失败的文件不会参与分析。</div>
+            <div className="src-tip">归属只能二选一：自有数据 / 竞品数据；资料类型必选，平台和补充说明选填。被忽略或解析失败的文件不会参与分析。</div>
             {unconfirmedCount > 0 && (
               <div className="src-bulk-attribution">
                 <span>
