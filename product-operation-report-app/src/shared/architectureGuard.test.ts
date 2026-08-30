@@ -1,3 +1,5 @@
+import { existsSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { PRODUCT_POLICY } from './productPolicy'
 import { REPORT_MODULES, REPORT_MODULES_V2 } from './types'
@@ -68,5 +70,13 @@ describe('active architecture guard', () => {
       aiConcurrency: 4,
       visionConcurrency: 2
     })
+  })
+
+  it('keeps npm and package-lock as the only production package-manager path', () => {
+    const packageJson = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8')) as { packageManager?: string }
+    expect(packageJson.packageManager).toMatch(/^npm@/u)
+    expect(existsSync(join(process.cwd(), 'package-lock.json'))).toBe(true)
+    expect(existsSync(join(process.cwd(), 'pnpm-lock.yaml'))).toBe(false)
+    expect(existsSync(join(process.cwd(), 'pnpm-workspace.yaml'))).toBe(false)
   })
 })
