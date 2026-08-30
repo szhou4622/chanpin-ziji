@@ -102,26 +102,51 @@ Existing `ProjectTaskSnapshot` records are projected deterministically:
 
 Legacy inline output is preserved separately. Migration never invokes a model and does not reinterpret old output content.
 
-Legacy attempt count is unknown, so the compatibility projection uses `attemptCount = 0` as an explicit migration sentinel; native Task Engine records will count real attempts.
+Legacy attempt count is unknown, so the compatibility projection uses `attemptCount = 0` as an explicit migration sentinel; the later Attempt Manager will count real attempts.
 
-## Phase 1A persistence bridge authority
+## Phase 1A shadow-write authority
 
-During the compatibility bridge, the current production runtime still writes `taskJournal`.
+The current production runtime still **reads** `taskJournal` for resume/reuse decisions. It is therefore still the read authority during this transition.
 
-On save/load, the sanitized journal is projected deterministically into `taskRecords` and both are persisted. The projected `taskRecords` are therefore a **read-only compatibility mirror**, not yet an independent source of truth.
+Runtime task mutations now pass through one adapter and shadow-write both representations with the same `updatedAt`:
 
-This is intentional:
+```text
+runtime mutation
+      ↓
+Task Journal Adapter
+   ↙             ↘
+taskJournal     taskRecords
+(read authority) (canonical shadow)
+```
 
-- old projects remain recoverable without model work;
-- current runtime behavior does not change;
-- large legacy output text is not duplicated into `TaskRecord`;
-- corrupt or arbitrary persisted `taskRecords` are not trusted as authoritative state during this bridge.
+Canonical shadow semantics currently include:
 
-When native TaskRecord writers are introduced, authority must switch explicitly in one migration step: canonical records must receive strict sanitization and become the write source of truth. Do not leave `taskJournal` and native `taskRecords` as long-lived competing writers, and do not silently overwrite native records with a legacy projection.
+- normal completed module/source-clean result → `SUCCEEDED + VALID`;
+- evidence-supported “暂无分析” module result → `SUCCEEDED + INSUFFICIENT`;
+- failed legacy task → canonical `FAILED`;
+- retry deletion removes the same task id from both representations.
+
+The two representations must not become independent competing writers. `taskRecords` is now produced by real runtime mutations, but it is not yet used to decide whether work should run.
+
+## Persistence trust boundary
+
+Persisted `taskRecords` are strictly sanitized before they can be restored as the canonical shadow.
+
+A persisted canonical record is accepted only when:
+
+1. its schema, id, task kind, statuses, timestamps, dependency structure and bounded string fields are valid;
+2. its id exactly matches the containing record key;
+3. its `updatedAt` exactly matches the corresponding sanitized `taskJournal` entry.
+
+If any check fails, the persisted canonical record is discarded and that task safely falls back to a deterministic journal projection.
+
+This means a corrupt, stale or hand-edited canonical shadow cannot override the current production recovery source. It also preserves canonical-only result semantics such as `INSUFFICIENT` when both sides came from the same runtime mutation.
+
+Load-time legacy recovery can still repair or delete journal entries. After those corrections, the renderer reconciles the canonical shadow again, so repaired journal state cannot retain an older mismatched canonical record.
 
 ## Storage boundary
 
-`TaskRecord` stores task metadata and references (`outputRef`), not large report/source/model text.
+`TaskRecord` stores task metadata and references (`outputRef`), not large report/source/model text. The current dual-write bridge does not copy legacy model output into canonical task metadata.
 
 Future storage split remains:
 
@@ -131,9 +156,22 @@ Future storage split remains:
 
 Phase 1A does not introduce SQLite.
 
+## Next authority switch
+
+The next Task-domain migration step may begin reading canonical task state only after shadow-write behavior has remained stable under real save/recovery tests.
+
+That switch must be explicit and one-directional:
+
+1. canonical TaskRecord becomes the read/write authority;
+2. legacy `taskJournal` becomes a compatibility projection for older code/projects;
+3. no long-lived dual-authority merge policy is allowed.
+
+Do not remove the legacy journal in the same change that switches authority. First switch read decisions behind a compatibility adapter and keep deterministic fallback for old projects.
+
 ## Not implemented in Phase 1A
 
-- native TaskRecord writer authority
+- canonical TaskRecord read authority
+- real Attempt Manager / attempt counting
 - Scheduler
 - Admission Engine
 - Retry Policy

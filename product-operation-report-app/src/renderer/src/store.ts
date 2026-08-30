@@ -19,6 +19,7 @@ import type {
   ReportEngineVersion
 } from '../../shared/types'
 import { REPORT_MODULES, REPORT_MODULES_V2, SOP_STEPS } from '../../shared/types'
+import { reconcileTaskRecordMirror, type TaskRecord } from '../../shared/taskModel'
 import { FINAL_REPORT_PARTS } from './reportTemplate'
 import {
   buildExtractMessages,
@@ -35,7 +36,7 @@ import { friendlyError } from './store/errors'
 import { buildProjectSnapshot } from './store/persistence'
 import { mergeRevisionParts, runFinalReportInParts, runModelRetry, selectRevisionParts } from './store/analysis'
 import { isTemporaryReservationContention, planCleaningConcurrency } from './store/cleaning'
-import { removeTaskJournalEntries, writeTaskJournalEntry } from './store/taskJournalAdapter'
+import { removeRuntimeTaskState, writeRuntimeTaskState } from './store/taskJournalAdapter'
 import {
   buildCleaningPlan,
   type CleaningMethod,
@@ -756,6 +757,7 @@ interface StoreState {
   cleanDetails: ProjectCleanDetailSnapshot[]
   artifacts: Record<number, string>
   taskJournal: Record<string, ProjectTaskSnapshot>
+  taskRecords: Record<string, TaskRecord>
   reportMarkdown: string
   reportStale: boolean
   abortFn: (() => void) | null
@@ -811,7 +813,7 @@ interface StoreState {
 
 const invalidatedAnalysis = (): Pick<
   StoreState,
-  'cleanedData' | 'phase' | 'abortFn' | 'exportStatus' | 'cleaningProgress' | 'reportReuseOffer' | 'taskJournal' | 'moduleStates'
+  'cleanedData' | 'phase' | 'abortFn' | 'exportStatus' | 'cleaningProgress' | 'reportReuseOffer' | 'taskJournal' | 'taskRecords' | 'moduleStates'
 > => ({
   cleanedData: '',
   phase: 'idle',
@@ -820,6 +822,7 @@ const invalidatedAnalysis = (): Pick<
   cleaningProgress: emptyCleaningProgress(),
   reportReuseOffer: null,
   taskJournal: {},
+  taskRecords: {},
   moduleStates: {}
 })
 
@@ -851,6 +854,7 @@ export const useStore = create<StoreState>((set, get) => ({
   cleanDetails: [],
   artifacts: {},
   taskJournal: {},
+  taskRecords: {},
   reportMarkdown: '',
   reportStale: false,
   abortFn: null,
@@ -1074,6 +1078,7 @@ export const useStore = create<StoreState>((set, get) => ({
       restoredSourceState.derivedParentIds,
       restoredSourceState.sources
     )
+    const restoredTaskRecords = reconcileTaskRecordMirror(restoredTaskJournal, lastProject?.taskRecords || {})
     set({
       initialized: true,
       persistencePaused: false,
@@ -1090,6 +1095,7 @@ export const useStore = create<StoreState>((set, get) => ({
       cleanDetails: restoredCleanDetails,
       artifacts: restoredArtifacts,
       taskJournal: restoredTaskJournal,
+      taskRecords: restoredTaskRecords,
       reportMarkdown: restoredReport,
       reportStale: Boolean(lastProject?.reportStale),
       phase: lastProject ? restorePhase(lastProject) : 'idle',
@@ -1135,6 +1141,7 @@ export const useStore = create<StoreState>((set, get) => ({
       cleanDetails: current.cleanDetails,
       artifacts: current.artifacts,
       taskJournal: current.taskJournal,
+      taskRecords: current.taskRecords,
       reportMarkdown: current.reportMarkdown,
       reportStale: current.reportStale,
       phase: current.phase,
@@ -1167,6 +1174,7 @@ export const useStore = create<StoreState>((set, get) => ({
       cleanDetails: [] as { id: string; name: string; text: string }[],
       artifacts: {} as Record<number, string>,
       taskJournal: {} as Record<string, ProjectTaskSnapshot>,
+      taskRecords: {} as Record<string, TaskRecord>,
       reportMarkdown: '',
       reportStale: false,
       phase: 'idle' as Phase,
@@ -1281,6 +1289,9 @@ export const useStore = create<StoreState>((set, get) => ({
       })
     }
 
+    const restoredPreviousTaskJournal = previous.taskJournal || {}
+    const restoredPreviousTaskRecords = reconcileTaskRecordMirror(restoredPreviousTaskJournal, previous.taskRecords || {})
+
     const restoredState = {
       sources: previous.sources.map((source) => ({
         ...source,
@@ -1294,7 +1305,8 @@ export const useStore = create<StoreState>((set, get) => ({
       cleanedData: previous.cleanedData || '',
       cleanDetails: Array.isArray(previous.cleanDetails) ? previous.cleanDetails : [],
       artifacts: restoredArtifacts,
-      taskJournal: previous.taskJournal || {},
+      taskJournal: restoredPreviousTaskJournal,
+      taskRecords: restoredPreviousTaskRecords,
       reportMarkdown: restoredReport,
       reportStale: Boolean(previous.reportStale),
       phase: restorePhase(previous),
@@ -2277,10 +2289,12 @@ export const useStore = create<StoreState>((set, get) => ({
                 }
                 batchOutputs[batchPosition] = verifiedText
                 set((state) => ({
-                  taskJournal: writeTaskJournalEntry(state.taskJournal, batchTaskId, {
+                  ...writeRuntimeTaskState(state.taskJournal, state.taskRecords, batchTaskId, {
                     kind: 'source_clean',
                     status: 'complete',
-                    output: verifiedText
+                    output: verifiedText,
+                    resultStatus: 'VALID',
+                    sourceId: s.id
                   }),
                   cleaningProgress: {
                     ...state.cleaningProgress,
@@ -2533,8 +2547,8 @@ export const useStore = create<StoreState>((set, get) => ({
         const message = result.error || '模块没有返回内容'
         updateModuleState(module.key, { status: 'failed', message, updatedAt: new Date().toISOString() })
         set((state) => ({
-          taskJournal: writeTaskJournalEntry(state.taskJournal, savedTaskId, {
-            kind: 'module', status: 'failed', output: result.text, inputFingerprint
+          ...writeRuntimeTaskState(state.taskJournal, state.taskRecords, savedTaskId, {
+            kind: 'module', status: 'failed', output: result.text, inputFingerprint, moduleKey: module.key
           })
         }))
         return
@@ -2578,8 +2592,8 @@ export const useStore = create<StoreState>((set, get) => ({
         const message = validationErrors.join('；')
         updateModuleState(module.key, { status: 'failed', message, updatedAt: new Date().toISOString() })
         set((state) => ({
-          taskJournal: writeTaskJournalEntry(state.taskJournal, savedTaskId, {
-            kind: 'module', status: 'failed', output: moduleOutput, inputFingerprint
+          ...writeRuntimeTaskState(state.taskJournal, state.taskRecords, savedTaskId, {
+            kind: 'module', status: 'failed', output: moduleOutput, inputFingerprint, moduleKey: module.key
           })
         }))
         return
@@ -2587,8 +2601,9 @@ export const useStore = create<StoreState>((set, get) => ({
       if (isNoAnalysisOutput(moduleOutput)) {
         const output = normalizeNoAnalysisOutput(moduleOutput)
         set((state) => ({
-          taskJournal: writeTaskJournalEntry(state.taskJournal, savedTaskId, {
-            kind: 'module', status: 'complete', output, inputFingerprint
+          ...writeRuntimeTaskState(state.taskJournal, state.taskRecords, savedTaskId, {
+            kind: 'module', status: 'complete', output, inputFingerprint,
+            resultStatus: 'INSUFFICIENT', moduleKey: module.key
           })
         }))
         updateModuleState(module.key, { status: 'skipped', message: output, updatedAt: new Date().toISOString() })
@@ -2597,8 +2612,9 @@ export const useStore = create<StoreState>((set, get) => ({
       }
       set((state) => ({
         artifacts: { ...state.artifacts, [module.id]: moduleOutput },
-        taskJournal: writeTaskJournalEntry(state.taskJournal, savedTaskId, {
-          kind: 'module', status: 'complete', output: moduleOutput, inputFingerprint
+        ...writeRuntimeTaskState(state.taskJournal, state.taskRecords, savedTaskId, {
+          kind: 'module', status: 'complete', output: moduleOutput, inputFingerprint,
+          resultStatus: 'VALID', moduleKey: module.key
         })
       }))
       updateModuleState(module.key, { status: 'done', updatedAt: new Date().toISOString() })
@@ -2617,8 +2633,8 @@ export const useStore = create<StoreState>((set, get) => ({
         const taskId = `${sessionId}:module:v2:${module.key}`
         updateModuleState(module.key, { status: 'failed', message, updatedAt: new Date().toISOString() })
         set((state) => ({
-          taskJournal: writeTaskJournalEntry(state.taskJournal, taskId, {
-            kind: 'module', status: 'failed'
+          ...writeRuntimeTaskState(state.taskJournal, state.taskRecords, taskId, {
+            kind: 'module', status: 'failed', moduleKey: module.key
           })
         }))
       }
@@ -2781,8 +2797,9 @@ export const useStore = create<StoreState>((set, get) => ({
     const affectedIds = new Set(REPORT_MODULES.filter((module) => affected.has(module.key)).map((module) => module.id))
     set((state) => ({
       artifacts: Object.fromEntries(Object.entries(state.artifacts).filter(([id]) => !affectedIds.has(Number(id)) && Number(id) !== REPORT_STEP_ID)),
-      taskJournal: removeTaskJournalEntries(
+      ...removeRuntimeTaskState(
         state.taskJournal,
+        state.taskRecords,
         (taskId) => [...affected].some((moduleKey) => taskId.includes(`:module:v2:${moduleKey}`))
       ),
       moduleStates: Object.fromEntries(Object.entries(state.moduleStates).filter(([moduleKey]) => !affected.has(moduleKey as ModuleKey))),
