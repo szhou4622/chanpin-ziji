@@ -44,8 +44,18 @@ jobs:
       - name: Run unit tests
         run: npm run test:unit
 
+      - name: Prepare Electron sandbox for regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          sandbox="node_modules/electron/dist/chrome-sandbox"
+          test -f "${sandbox}"
+          sudo chown root:root "${sandbox}"
+          sudo chmod 4755 "${sandbox}"
+          stat -c '%U %G %a %n' "${sandbox}"
+
       - name: Run core regression suite
-        run: npm run test:regression
+        run: xvfb-run -a npm run test:regression
 
       - name: Build application
         run: npm run build
