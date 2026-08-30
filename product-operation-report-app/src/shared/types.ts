@@ -552,6 +552,8 @@ export interface SavedProject {
   taskJournal?: Record<string, ProjectTaskSnapshot>
   /** Phase 1A deterministic projection of taskJournal into the canonical task domain model. */
   taskRecords?: Record<string, import('./taskModel').TaskRecord>
+  /** Explicit current Task instance pointer per stable logical business slot. */
+  currentTaskByLogicalKey?: import('./taskCurrentIndex').TaskCurrentIndex
   reportMarkdown: string
   reportStale: boolean
   phase: ProjectPhase
