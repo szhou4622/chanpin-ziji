@@ -63,9 +63,25 @@ For the active graph:
 
 No module id or downstream chain should be duplicated manually in store code.
 
+## Canonical scheduler-state persistence
+
+Scheduler states may exist before any model output or legacy journal payload exists, so canonical `TaskRecord` metadata must survive persistence independently of `taskJournal`.
+
+The persistence bridge now uses these rules:
+
+- canonical-only `PENDING`, `READY`, `WAITING_RETRY`, `PAUSED`, `FAILED` and `CANCELLED` records may survive save/reload after strict sanitization;
+- canonical-only `RUNNING` is restored as `PAUSED`, because the process that owned that execution no longer exists after application restart;
+- `WAITING_RETRY.retryAt` is preserved;
+- canonical-only `SUCCEEDED` is rejected during this bridge, because successful completion must remain tied to a verified journal/output payload until Artifact/Blob output references become authoritative;
+- if a legacy journal payload exists, canonical metadata must still match the same task id and `updatedAt` mutation before it can override the deterministic journal projection.
+
+This makes it safe for the next scheduler slice to create durable nonterminal tasks without pretending to implement crash resume yet.
+
+A restored `PAUSED` task is **not automatically resumed** in this phase. Recovery/Attempt reconciliation is a later responsibility.
+
 ## What this is not yet
 
-This resolver is not yet the full Task Scheduler.
+This resolver/persistence layer is not yet the full Task Scheduler.
 
 It does not own:
 
@@ -73,9 +89,9 @@ It does not own:
 - points reservation or billing;
 - AI/global/vision concurrency slots;
 - parse-worker scheduling;
-- TaskRecord `PENDING/READY/RUNNING/WAITING_RETRY` transitions;
+- runtime TaskRecord `PENDING/READY/RUNNING/WAITING_RETRY` transition orchestration;
 - transport attempts;
-- retry timing/backoff;
+- retry timing/backoff execution;
 - provider routing;
 - server request reconciliation.
 

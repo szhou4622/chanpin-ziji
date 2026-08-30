@@ -253,6 +253,48 @@ async function testProjectRevisionAndBackup(): Promise<void> {
   const restoredTamperedTask = await loadLastProject()
   assert.equal(restoredTamperedTask?.taskRecords?.[canonicalTaskId]?.resultStatus, 'VALID', 'malformed canonical metadata falls back to journal projection')
   assert.equal(restoredTamperedTask?.taskRecords?.[canonicalTaskId]?.migratedFromLegacy, true, 'fallback projection is explicitly marked legacy-derived')
+  const schedulerTaskBase = {
+    schemaVersion: 1 as const,
+    kind: 'MODULE_ANALYSIS' as const,
+    dependencies: [],
+    attemptCount: 0,
+    createdAt: '2026-08-30T07:00:00.000Z',
+    updatedAt: '2026-08-30T07:01:00.000Z',
+    migratedFromLegacy: false
+  }
+  const schedulerSnapshot: SavedProject = {
+    ...snapshot(7, ''),
+    taskRecords: {
+      'session:module:v2:product-info': {
+        ...schedulerTaskBase,
+        id: 'session:module:v2:product-info',
+        moduleKey: 'product-info',
+        executionStatus: 'PENDING'
+      },
+      'session:module:v2:material-review': {
+        ...schedulerTaskBase,
+        id: 'session:module:v2:material-review',
+        moduleKey: 'material-review',
+        executionStatus: 'WAITING_RETRY',
+        retryAt: '2026-08-30T07:10:00.000Z'
+      },
+      'session:module:v2:voc': {
+        ...schedulerTaskBase,
+        id: 'session:module:v2:voc',
+        moduleKey: 'voc',
+        executionStatus: 'RUNNING',
+        startedAt: '2026-08-30T07:01:00.000Z'
+      }
+    }
+  }
+  await saveLastProject(schedulerSnapshot)
+  const restoredScheduler = await loadLastProject()
+  assert.equal(restoredScheduler?.taskRecords?.['session:module:v2:product-info']?.executionStatus, 'PENDING', 'canonical-only PENDING survives project persistence')
+  assert.equal(restoredScheduler?.taskRecords?.['session:module:v2:material-review']?.executionStatus, 'WAITING_RETRY', 'canonical-only WAITING_RETRY survives project persistence')
+  assert.equal(restoredScheduler?.taskRecords?.['session:module:v2:material-review']?.retryAt, '2026-08-30T07:10:00.000Z', 'retryAt survives project persistence')
+  assert.equal(restoredScheduler?.taskRecords?.['session:module:v2:voc']?.executionStatus, 'PAUSED', 'orphaned RUNNING is recovered as PAUSED after restart')
+  assert.equal(restoredScheduler?.taskRecords?.['session:module:v2:voc']?.startedAt, '2026-08-30T07:01:00.000Z', 'recovered PAUSED task retains its original start timestamp')
+
   const migratedSnapshot: SavedProject = {
     ...snapshot(7, '# 产品与内容经营报告'),
     engineVersion: 'v2',

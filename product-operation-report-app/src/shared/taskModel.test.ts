@@ -117,6 +117,48 @@ describe('task domain model', () => {
     expect(fallback.migratedFromLegacy).toBe(true)
   })
 
+  it('preserves canonical-only scheduler states and pauses orphaned RUNNING work on recovery', () => {
+    const base: TaskRecord = {
+      schemaVersion: 1,
+      id: 'session:module:v2:product-info',
+      kind: 'MODULE_ANALYSIS',
+      executionStatus: 'PENDING',
+      dependencies: [],
+      moduleKey: 'product-info',
+      attemptCount: 0,
+      createdAt: '2026-08-30T07:00:00.000Z',
+      updatedAt: '2026-08-30T07:01:00.000Z',
+      migratedFromLegacy: false
+    }
+    const pending = { ...base }
+    const ready = { ...base, id: 'session:module:v2:platform-audience', moduleKey: 'platform-audience' as const, executionStatus: 'READY' as const }
+    const waiting = { ...base, id: 'session:module:v2:material-review', moduleKey: 'material-review' as const, executionStatus: 'WAITING_RETRY' as const, retryAt: '2026-08-30T07:10:00.000Z' }
+    const running = { ...base, id: 'session:module:v2:voc', moduleKey: 'voc' as const, executionStatus: 'RUNNING' as const, startedAt: '2026-08-30T07:01:00.000Z' }
+    const failed = { ...base, id: 'session:module:v2:selling-points', moduleKey: 'selling-points' as const, executionStatus: 'FAILED' as const, errorClass: 'NETWORK' }
+    const reconciled = reconcileTaskRecordMirror({}, {
+      [pending.id]: pending,
+      [ready.id]: ready,
+      [waiting.id]: waiting,
+      [running.id]: running,
+      [failed.id]: failed
+    })
+
+    expect(reconciled[pending.id].executionStatus).toBe('PENDING')
+    expect(reconciled[ready.id].executionStatus).toBe('READY')
+    expect(reconciled[waiting.id]).toMatchObject({ executionStatus: 'WAITING_RETRY', retryAt: waiting.retryAt })
+    expect(reconciled[failed.id]).toMatchObject({ executionStatus: 'FAILED', errorClass: 'NETWORK' })
+    expect(reconciled[running.id]).toMatchObject({
+      executionStatus: 'PAUSED',
+      startedAt: running.startedAt,
+      migratedFromLegacy: false
+    })
+  })
+
+  it('rejects canonical-only SUCCEEDED metadata without a matching payload carrier', () => {
+    const succeeded = succeededTask({ id: 'session:module:v2:voc', migratedFromLegacy: false })
+    expect(reconcileTaskRecordMirror({}, { [succeeded.id]: succeeded })[succeeded.id]).toBeUndefined()
+  })
+
   it('projects a sanitized legacy journal into canonical task records without carrying large outputs', () => {
     const journal: Record<string, ProjectTaskSnapshot> = {
       'clean:source-a': {

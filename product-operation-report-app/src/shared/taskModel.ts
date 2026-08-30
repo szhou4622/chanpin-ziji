@@ -284,9 +284,16 @@ export function projectLegacyTaskJournal(
 }
 
 /**
- * During the dual-write bridge the journal remains the read authority. Persisted
- * canonical records are accepted only for journal tasks with the exact same
- * updatedAt, proving both sides came from the same logical mutation.
+ * Reconciles legacy payload-backed tasks with canonical task metadata.
+ *
+ * - A journal-backed task accepts canonical metadata only when both sides share the
+ *   same id + updatedAt mutation.
+ * - A canonical-only task may survive persistence while it has not succeeded yet;
+ *   scheduler states do not have a legacy journal representation.
+ * - A persisted RUNNING task is recovered as PAUSED because the process that owned
+ *   the execution no longer exists after application restart.
+ * - A canonical-only SUCCEEDED task is rejected here: completed output must remain
+ *   tied to a verified payload/output migration rather than metadata alone.
  */
 export function reconcileTaskRecordMirror(
   journal: Readonly<Record<string, ProjectTaskSnapshot>>,
@@ -298,6 +305,18 @@ export function reconcileTaskRecordMirror(
     if (canonical && canonical.id === taskId && canonical.updatedAt === snapshot.updatedAt) {
       projected[taskId] = canonical
     }
+  }
+  for (const [taskId, canonical] of Object.entries(persisted)) {
+    if (journal[taskId] || canonical.id !== taskId || canonical.executionStatus === 'SUCCEEDED') continue
+    projected[taskId] = canonical.executionStatus === 'RUNNING'
+      ? {
+          ...canonical,
+          executionStatus: 'PAUSED',
+          resultStatus: undefined,
+          retryAt: undefined,
+          endedAt: undefined
+        }
+      : canonical
   }
   return projected
 }
