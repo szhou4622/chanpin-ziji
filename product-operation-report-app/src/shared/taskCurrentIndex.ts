@@ -40,6 +40,19 @@ function mayBeReplaced(task: TaskRecord): boolean {
   return task.executionStatus === 'SUCCEEDED' || task.executionStatus === 'CANCELLED'
 }
 
+function sameImmutableTaskIdentity(left: TaskRecord, right: TaskRecord): boolean {
+  return (
+    left.id === right.id &&
+    resolvedTaskLogicalKey(left) === resolvedTaskLogicalKey(right) &&
+    left.payloadKey === right.payloadKey &&
+    left.kind === right.kind &&
+    left.inputFingerprint === right.inputFingerprint &&
+    left.sourceId === right.sourceId &&
+    left.moduleKey === right.moduleKey &&
+    left.createdAt === right.createdAt
+  )
+}
+
 export interface RegisterCurrentTaskResult {
   taskRecords: Record<string, TaskRecord>
   currentIndex: TaskCurrentIndex
@@ -60,18 +73,19 @@ export function registerCurrentTask(
   }
 
   const existingById = taskRecords[task.id]
-  if (existingById && existingById !== task) {
-    throw new Error(`任务实例 ID 已存在：${task.id}`)
+  if (existingById && !sameImmutableTaskIdentity(existingById, task)) {
+    throw new Error(`任务实例 ID 已存在且身份不一致：${task.id}`)
   }
+  const registeredTask = existingById || task
 
   const current = currentTaskForLogicalKey(taskRecords, currentIndex, logicalKey)
-  if (current && current.id !== task.id && !mayBeReplaced(current)) {
+  if (current && current.id !== registeredTask.id && !mayBeReplaced(current)) {
     throw new Error(`当前任务 ${current.id} 尚未进入可替换终态`)
   }
 
   return {
     taskRecords: existingById ? { ...taskRecords } : { ...taskRecords, [task.id]: task },
-    currentIndex: { ...currentIndex, [logicalKey]: task.id }
+    currentIndex: { ...currentIndex, [logicalKey]: registeredTask.id }
   }
 }
 
