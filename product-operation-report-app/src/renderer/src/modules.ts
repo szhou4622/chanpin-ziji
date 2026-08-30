@@ -11,6 +11,7 @@ import type {
   ModuleRunState
 } from '../../shared/types'
 import { REPORT_MODULES_V2, SOURCE_KIND_LABELS } from '../../shared/types'
+import { collectAffectedModuleKeys } from './moduleDependencyResolver'
 
 export interface ModuleSourceBlock {
   name: string
@@ -256,21 +257,11 @@ export function retryScopeForModules(
   states: Partial<Record<ModuleKey, ModuleRunState>>,
   requestedKey: ModuleKey
 ): Set<ModuleKey> {
-  const affected = new Set<ModuleKey>([requestedKey])
+  const seeds = new Set<ModuleKey>([requestedKey])
   for (const module of modules) {
-    if (states[module.key]?.status === 'failed') affected.add(module.key)
+    if (states[module.key]?.status === 'failed') seeds.add(module.key)
   }
-  let changed = true
-  while (changed) {
-    changed = false
-    for (const module of modules) {
-      if (!affected.has(module.key) && module.dependsOn.some((dependency) => affected.has(dependency))) {
-        affected.add(module.key)
-        changed = true
-      }
-    }
-  }
-  return affected
+  return collectAffectedModuleKeys(modules, seeds)
 }
 
 export function buildModuleMessages(module: ReportModule, context: ModuleContext): ChatMessage[] {
