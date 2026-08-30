@@ -156,16 +156,16 @@ describe('v2 six-module report engine', () => {
     )
   })
 
-  it('requires all four VOC groups and keeps TOP labels separate from user terms', () => {
+  it('requires all four VOC groups but allows evidence-supported sparse TOP results', () => {
     const groups = [
       { heading: '1. 隐形需求 TOP10', field: '需求', positive: false },
       { heading: '2. 购买顾虑 TOP10', field: '顾虑', positive: false },
       { heading: '3. 高频问题 TOP10', field: '问题', positive: false },
       { heading: '4. 正向反馈 TOP10', field: '反馈', positive: true }
     ]
-    const valid = groups.map((group) => [
+    const buildVoc = (count: number): string => groups.map((group) => [
       group.heading,
-      ...Array.from({ length: 10 }, (_, index) => [
+      ...Array.from({ length: count }, (_, index) => [
         `TOP${index + 1}`,
         `${group.field}：真实词${index + 1}`,
         ...(group.positive ? ['认可类型：产品体验', '认可价值：使用更方便'] : []),
@@ -176,13 +176,23 @@ describe('v2 six-module report engine', () => {
         `来源：评价表｜${index + 1}`
       ].join('\n'))
     ].join('\n')).join('\n\n')
-    expect(validateModuleOutput('voc', valid, 'v2')).toEqual([])
-    expect(validateModuleOutput('voc', valid.replace('频次：20次\n占比：10%', '频次：无精确频次｜占比无法计算'), 'v2')).toEqual([])
-    expect(validateModuleOutput('voc', valid.split('2. 购买顾虑 TOP10')[0], 'v2')).toContain(
+
+    const full = buildVoc(10)
+    const sparse = buildVoc(4)
+    expect(validateModuleOutput('voc', full, 'v2')).toEqual([])
+    expect(validateModuleOutput('voc', sparse, 'v2')).toEqual([])
+    expect(validateModuleOutput('voc', sparse.replace('频次：20次\n占比：10%', '频次：无精确频次｜占比无法计算'), 'v2')).toEqual([])
+    expect(validateModuleOutput('voc', buildVoc(11), 'v2')).toContain(
+      '1. 隐形需求 TOP10必须包含连续的TOP1-TOPN，且N不得超过10'
+    )
+    expect(validateModuleOutput('voc', sparse.split('2. 购买顾虑 TOP10')[0], 'v2')).toContain(
       'VOC必须按顺序完整包含隐形需求、购买顾虑、高频问题、正向反馈四组TOP10'
     )
     const module = REPORT_MODULES_V2.find((item) => item.key === 'voc')!
-    expect(moduleValidationRetryInstruction(module, ['缺少三组'], 1)).toContain('不能只输出第一组')
+    const retry = moduleValidationRetryInstruction(module, ['缺少三组'], 1)
+    expect(retry).toContain('不能只输出第一组')
+    expect(retry).toContain('不足10条时必须少输出')
+    expect(retry).not.toContain('每组必须有TOP1到TOP10共10条')
   })
 
   it('assembles M1-M6 in order and keeps the old benchmark only as an appendix', () => {
@@ -206,6 +216,27 @@ describe('v2 six-module report engine', () => {
     expect(projection.reportMarkdown).toContain('旧版自动转换')
     expect(projection.reportMarkdown).toContain('旧版对标附录')
     expect(projection.moduleStates['selling-points']?.message).toContain('按新版重新生成')
+  })
+
+  it('allows one to five evidence-supported audience-selling-point-scene combinations', () => {
+    const buildScene = (count: number): string => [
+      '核心人群 × 卖点 × 场景 TOP5',
+      ...Array.from({ length: count }, (_, index) => [
+        `TOP${index + 1}`,
+        `核心人群：人群${index + 1}`,
+        '人群依据：成交画像',
+        `核心卖点：卖点${index + 1}`,
+        '卖点依据：产品事实',
+        `真实场景：场景${index + 1}`,
+        '场景依据：用户反馈'
+      ].join('\n'))
+    ].join('\n\n')
+
+    expect(validateModuleOutput('audience-sp-scene', buildScene(3), 'v2')).toEqual([])
+    expect(validateModuleOutput('audience-sp-scene', buildScene(5), 'v2')).toEqual([])
+    expect(validateModuleOutput('audience-sp-scene', buildScene(6), 'v2')).toContain(
+      '人群卖点场景模块必须包含连续的TOP1-TOPN，且N不得超过5'
+    )
   })
 
   it('treats evidence-bound no-result output as 暂无分析 instead of a module failure', () => {
