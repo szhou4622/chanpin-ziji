@@ -6,6 +6,8 @@ import {
   isReusableTaskResult,
   projectLegacyTaskJournal,
   projectLegacyTaskSnapshot,
+  reconcileTaskRecordMirror,
+  sanitizeTaskRecords,
   type TaskRecord
 } from './taskModel'
 
@@ -68,6 +70,51 @@ describe('task domain model', () => {
       'module:m4': 'm4:v4',
       'module:m5': 'm5:v2'
     })).toBe(false)
+  })
+
+  it('strictly sanitizes persisted canonical records and drops malformed state', () => {
+    const valid = succeededTask({
+      id: 'session:module:v2:voc',
+      resultStatus: 'INSUFFICIENT',
+      updatedAt: '2026-08-30T03:00:00.000Z',
+      createdAt: '2026-08-30T02:59:00.000Z',
+      migratedFromLegacy: false
+    })
+    const sanitized = sanitizeTaskRecords({
+      [valid.id]: valid,
+      'bad:id-mismatch': { ...valid, id: 'another-id' },
+      'bad:failed-with-result': { ...valid, id: 'bad:failed-with-result', executionStatus: 'FAILED', resultStatus: 'VALID' },
+      'bad:date': { ...valid, id: 'bad:date', updatedAt: 'not-a-date' },
+      'bad:module': { ...valid, id: 'bad:module', moduleKey: 'made-up-module' }
+    })
+
+    expect(sanitized).toEqual({ [valid.id]: valid })
+  })
+
+  it('accepts a canonical mirror only when it matches the same journal mutation', () => {
+    const journal: Record<string, ProjectTaskSnapshot> = {
+      'session:module:v2:voc': {
+        kind: 'module',
+        status: 'complete',
+        output: '暂无分析：证据不足',
+        inputFingerprint: 'voc-input',
+        updatedAt: '2026-08-30T03:00:00.000Z'
+      }
+    }
+    const canonical = succeededTask({
+      id: 'session:module:v2:voc',
+      resultStatus: 'INSUFFICIENT',
+      inputFingerprint: 'voc-input',
+      updatedAt: '2026-08-30T03:00:00.000Z',
+      createdAt: '2026-08-30T02:59:00.000Z',
+      migratedFromLegacy: false
+    })
+    expect(reconcileTaskRecordMirror(journal, { [canonical.id]: canonical })[canonical.id].resultStatus).toBe('INSUFFICIENT')
+
+    const staleCanonical = { ...canonical, updatedAt: '2026-08-30T02:59:59.000Z' }
+    const fallback = reconcileTaskRecordMirror(journal, { [canonical.id]: staleCanonical })[canonical.id]
+    expect(fallback.resultStatus).toBe('VALID')
+    expect(fallback.migratedFromLegacy).toBe(true)
   })
 
   it('projects a sanitized legacy journal into canonical task records without carrying large outputs', () => {
