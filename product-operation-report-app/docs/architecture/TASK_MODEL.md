@@ -1,6 +1,6 @@
 # Task Domain Model
 
-Phase 1A introduces the canonical task vocabulary and a compatibility persistence bridge. It does **not** replace the current scheduler/request pipeline yet.
+Phase 1A introduces the canonical task vocabulary and a compatibility persistence/read bridge. It does **not** replace the current scheduler/request pipeline yet.
 
 ## Task vs Attempt
 
@@ -104,11 +104,9 @@ Legacy inline output is preserved separately. Migration never invokes a model an
 
 Legacy attempt count is unknown, so the compatibility projection uses `attemptCount = 0` as an explicit migration sentinel; the later Attempt Manager will count real attempts.
 
-## Phase 1A shadow-write authority
+## Phase 1A runtime authority bridge
 
-The current production runtime still **reads** `taskJournal` for resume/reuse decisions. It is therefore still the read authority during this transition.
-
-Runtime task mutations now pass through one adapter and shadow-write both representations with the same `updatedAt`:
+Runtime task mutations pass through one adapter and write both representations with the same `updatedAt`:
 
 ```text
 runtime mutation
@@ -116,21 +114,48 @@ runtime mutation
 Task Journal Adapter
    ↙             ↘
 taskJournal     taskRecords
-(read authority) (canonical shadow)
+(payload)       (canonical state)
 ```
 
-Canonical shadow semantics currently include:
+The active v2 resume/reuse decisions for source-clean batches and module results now read through `readRuntimeTaskState()`:
+
+```text
+readRuntimeTaskState
+      ↓
+TaskRecord decides execution/result state
+      +
+taskJournal supplies legacy inline output payload
+```
+
+Current canonical state semantics include:
 
 - normal completed module/source-clean result → `SUCCEEDED + VALID`;
 - evidence-supported “暂无分析” module result → `SUCCEEDED + INSUFFICIENT`;
-- failed legacy task → canonical `FAILED`;
+- failed task → canonical `FAILED`;
 - retry deletion removes the same task id from both representations.
 
-The two representations must not become independent competing writers. `taskRecords` is now produced by real runtime mutations, but it is not yet used to decide whether work should run.
+A source-clean batch is reusable only when canonical state is `SUCCEEDED + VALID` and its journal payload exists.
+
+A module result is reusable only when canonical state is `SUCCEEDED + VALID` or `SUCCEEDED + INSUFFICIENT`, its input fingerprint matches the current module input, and its journal payload exists. `STALE`, `INVALID`, `FAILED`, `PAUSED` and other non-reusable states cannot be revived merely because old output text remains in the journal.
+
+`taskJournal` is therefore no longer the execution/result-state authority for these active runtime reuse decisions. It remains the compatibility payload carrier and is still used by load-time legacy repair/migration paths until artifact/output storage is separated.
+
+The two representations must not become independent competing writers.
+
+## Read bridge fallback rule
+
+Canonical state is accepted by the runtime read bridge only when it represents the exact same mutation as the payload carrier:
+
+1. the canonical record id matches the task id;
+2. canonical `updatedAt` exactly matches the corresponding journal entry.
+
+If those conditions are not met, the bridge deterministically projects the journal entry into a legacy-derived `TaskRecord`.
+
+This fallback is a compatibility/recovery rule, not a long-term merge strategy. It prevents stale or partially migrated canonical metadata from blocking old projects while the transition is incomplete.
 
 ## Persistence trust boundary
 
-Persisted `taskRecords` are strictly sanitized before they can be restored as the canonical shadow.
+Persisted `taskRecords` are strictly sanitized before restore.
 
 A persisted canonical record is accepted only when:
 
@@ -140,13 +165,13 @@ A persisted canonical record is accepted only when:
 
 If any check fails, the persisted canonical record is discarded and that task safely falls back to a deterministic journal projection.
 
-This means a corrupt, stale or hand-edited canonical shadow cannot override the current production recovery source. It also preserves canonical-only result semantics such as `INSUFFICIENT` when both sides came from the same runtime mutation.
+This means a corrupt, stale or hand-edited canonical record cannot override recoverable project state. It also preserves canonical-only result semantics such as `INSUFFICIENT` when both sides came from the same runtime mutation.
 
-Load-time legacy recovery can still repair or delete journal entries. After those corrections, the renderer reconciles the canonical shadow again, so repaired journal state cannot retain an older mismatched canonical record.
+Load-time legacy recovery can still repair or delete journal entries. After those corrections, the renderer reconciles canonical metadata again, so repaired journal state cannot retain an older mismatched canonical record.
 
 ## Storage boundary
 
-`TaskRecord` stores task metadata and references (`outputRef`), not large report/source/model text. The current dual-write bridge does not copy legacy model output into canonical task metadata.
+`TaskRecord` stores task metadata and references (`outputRef`), not large report/source/model text. The current bridge does not copy legacy model output into canonical task metadata.
 
 Future storage split remains:
 
@@ -156,30 +181,33 @@ Future storage split remains:
 
 Phase 1A does not introduce SQLite.
 
-## Next authority switch
+## Next migration boundary
 
-The next Task-domain migration step may begin reading canonical task state only after shadow-write behavior has remained stable under real save/recovery tests.
+The next task-domain work must **not** delete `taskJournal` or move large output text into `TaskRecord`.
 
-That switch must be explicit and one-directional:
+The safe next boundary is to introduce the runtime execution layer around this canonical vocabulary:
 
-1. canonical TaskRecord becomes the read/write authority;
-2. legacy `taskJournal` becomes a compatibility projection for older code/projects;
-3. no long-lived dual-authority merge policy is allowed.
+1. Scheduler / Dependency Resolver decides which canonical task may run;
+2. Admission Engine checks authorization, capability, concurrency and resource gates;
+3. Attempt Manager separates a logical Task from transport/provider attempts;
+4. Failure Classifier + Retry Policy drive `WAITING_RETRY` rather than ad-hoc retry branches;
+5. legacy journal remains a payload compatibility layer until Artifact/Blob references replace inline output.
 
-Do not remove the legacy journal in the same change that switches authority. First switch read decisions behind a compatibility adapter and keep deterministic fallback for old projects.
+This keeps the migration one-directional: new execution logic consumes canonical task state instead of creating another status system.
 
 ## Not implemented in Phase 1A
 
-- canonical TaskRecord read authority
 - real Attempt Manager / attempt counting
-- Scheduler
+- Scheduler / Dependency Resolver
 - Admission Engine
 - Retry Policy
 - Failure Classifier
-- automatic crash resume
+- automatic crash resume from nonterminal canonical tasks
 - server request status/cancel/reconcile
 - provider cancellation
 - billing settlement changes
+- full Artifact/Blob output-reference migration
+- removal of legacy `taskJournal`
 - SourceUnit/Evidence migration
 
 Those are later phases and must consume this task vocabulary rather than create parallel status systems.
