@@ -58,6 +58,7 @@ import {
   validateModuleOutput
 } from './modules'
 import { inferSourcePlatform } from './sourceMetadata'
+import { buildModuleExecutionBatches } from './moduleDependencyResolver'
 
 export { friendlyError } from './store/errors'
 export { buildProjectSnapshot } from './store/persistence'
@@ -2635,10 +2636,14 @@ export const useStore = create<StoreState>((set, get) => ({
       await window.api.saveLastProject(buildProjectSnapshot(get()))
     }
 
-    for (const wave of [1, 2, 3] as const) {
+    const executionBatches = buildModuleExecutionBatches(REPORT_MODULES)
+    for (const [batchIndex, runnable] of executionBatches.entries()) {
       if (!isCurrentSession() || get().phase !== 'analyzing') return
-      const runnable = REPORT_MODULES.filter((module) => module.wave === wave)
-      get()._post('assistant', `正在执行第${wave}/3波：${runnable.map((module) => `M${module.id} ${module.title}`).join('、')}`, 'narration')
+      get()._post(
+        'assistant',
+        `正在执行第${batchIndex + 1}/${executionBatches.length}波：${runnable.map((module) => `M${module.id} ${module.title}`).join('、')}`,
+        'narration'
+      )
       const results = await Promise.allSettled(runnable.map((module) => runModule(module)))
       for (const [index, result] of results.entries()) {
         if (result.status !== 'rejected') continue
