@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { ProjectTaskSnapshot } from '../../../shared/types'
 import type { TaskRecord } from '../../../shared/taskModel'
 import {
+  readRuntimeTaskState,
   removeRuntimeTaskState,
   removeTaskJournalEntries,
   writeRuntimeTaskState,
@@ -61,6 +62,61 @@ describe('task journal compatibility adapter', () => {
       updatedAt: '2026-08-30T06:31:00.000Z',
       migratedFromLegacy: false
     })
+  })
+
+  it('reads canonical task state while retaining legacy output payload', () => {
+    const runtime = writeRuntimeTaskState(
+      {},
+      {},
+      'session:module:v2:voc',
+      {
+        kind: 'module',
+        status: 'complete',
+        output: '暂无分析：证据不足',
+        inputFingerprint: 'voc-input-v2',
+        resultStatus: 'INSUFFICIENT',
+        moduleKey: 'voc'
+      },
+      () => '2026-08-30T06:32:00.000Z'
+    )
+    const read = readRuntimeTaskState(runtime.taskJournal, runtime.taskRecords, 'session:module:v2:voc')
+
+    expect(read.journal?.output).toBe('暂无分析：证据不足')
+    expect(read.task?.resultStatus).toBe('INSUFFICIENT')
+    expect(read.task?.migratedFromLegacy).toBe(false)
+  })
+
+  it('falls back to deterministic journal state when canonical metadata is stale', () => {
+    const journal: Record<string, ProjectTaskSnapshot> = {
+      'session:module:v2:voc': {
+        kind: 'module',
+        status: 'complete',
+        output: '旧VOC结果',
+        inputFingerprint: 'voc-input-v1',
+        updatedAt: '2026-08-30T06:33:00.000Z'
+      }
+    }
+    const staleCanonical: TaskRecord = {
+      schemaVersion: 1,
+      id: 'session:module:v2:voc',
+      kind: 'MODULE_ANALYSIS',
+      executionStatus: 'SUCCEEDED',
+      resultStatus: 'INSUFFICIENT',
+      dependencies: [],
+      inputFingerprint: 'voc-input-v1',
+      moduleKey: 'voc',
+      attemptCount: 0,
+      createdAt: '2026-08-30T06:30:00.000Z',
+      updatedAt: '2026-08-30T06:32:59.000Z',
+      endedAt: '2026-08-30T06:32:59.000Z',
+      migratedFromLegacy: false
+    }
+    const read = readRuntimeTaskState(journal, { [staleCanonical.id]: staleCanonical }, staleCanonical.id)
+
+    expect(read.task?.executionStatus).toBe('SUCCEEDED')
+    expect(read.task?.resultStatus).toBe('VALID')
+    expect(read.task?.migratedFromLegacy).toBe(true)
+    expect(read.journal?.output).toBe('旧VOC结果')
   })
 
   it('keeps canonical createdAt across rewrites while clearing stale result identity on a new failure', () => {

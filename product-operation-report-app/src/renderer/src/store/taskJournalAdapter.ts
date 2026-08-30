@@ -23,6 +23,36 @@ export interface RuntimeTaskState {
   taskRecords: TaskRecordMap
 }
 
+export interface RuntimeTaskRead {
+  /** Legacy payload/content carrier retained until Artifact/Blob references replace inline output. */
+  journal?: ProjectTaskSnapshot
+  /** Canonical task-state view used for execution/result decisions. */
+  task?: TaskRecord
+}
+
+/**
+ * Read boundary during the authority transition.
+ *
+ * Canonical metadata controls task-state decisions only when it represents the
+ * exact same mutation as the legacy payload carrier. Otherwise we deterministically
+ * project the journal entry, keeping old projects and repaired state recoverable.
+ */
+export function readRuntimeTaskState(
+  journal: Readonly<TaskJournal>,
+  taskRecords: Readonly<TaskRecordMap>,
+  taskId: string
+): RuntimeTaskRead {
+  const snapshot = journal[taskId]
+  if (!snapshot) return {}
+  const canonical = taskRecords[taskId]
+  return {
+    journal: snapshot,
+    task: canonical?.id === taskId && canonical.updatedAt === snapshot.updatedAt
+      ? canonical
+      : projectLegacyTaskSnapshot(taskId, snapshot).task
+  }
+}
+
 /**
  * Compatibility write boundary for the legacy production taskJournal.
  *

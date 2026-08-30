@@ -36,7 +36,7 @@ import { friendlyError } from './store/errors'
 import { buildProjectSnapshot } from './store/persistence'
 import { mergeRevisionParts, runFinalReportInParts, runModelRetry, selectRevisionParts } from './store/analysis'
 import { isTemporaryReservationContention, planCleaningConcurrency } from './store/cleaning'
-import { removeRuntimeTaskState, writeRuntimeTaskState } from './store/taskJournalAdapter'
+import { readRuntimeTaskState, removeRuntimeTaskState, writeRuntimeTaskState } from './store/taskJournalAdapter'
 import {
   buildCleaningPlan,
   type CleaningMethod,
@@ -2198,8 +2198,13 @@ export const useStore = create<StoreState>((set, get) => ({
                   )
                 }
                 const batchTaskId = `${sessionId}:source_clean:${s.id}:batch-v7-planned:${batch.context.batchIndex}`
-                const savedBatch = get().taskJournal[batchTaskId]
-                if (savedBatch?.status === 'complete' && savedBatch.output?.trim()) {
+                const savedBatchState = readRuntimeTaskState(get().taskJournal, get().taskRecords, batchTaskId)
+                const savedBatch = savedBatchState.journal
+                if (
+                  savedBatchState.task?.executionStatus === 'SUCCEEDED' &&
+                  savedBatchState.task.resultStatus === 'VALID' &&
+                  savedBatch?.output?.trim()
+                ) {
                   batchOutputs[batchPosition] = savedBatch.output
                   set((state) => ({
                     cleaningProgress: {
@@ -2459,7 +2464,9 @@ export const useStore = create<StoreState>((set, get) => ({
         return
       }
       const savedTaskId = `${sessionId}:module:v2:${module.key}`
-      const saved = get().taskJournal[savedTaskId]
+      const savedState = readRuntimeTaskState(get().taskJournal, get().taskRecords, savedTaskId)
+      const saved = savedState.journal
+      const savedTask = savedState.task
       const outsideTargetedRetry = get().moduleRetryScope.length > 0 && !get().moduleRetryScope.includes(module.key)
       if (outsideTargetedRetry) {
         const retained = get().artifacts[module.id]
@@ -2501,13 +2508,20 @@ export const useStore = create<StoreState>((set, get) => ({
       const requirements = [get().steering, get().moduleRetryInstructions[module.key]].filter(Boolean).join('\n')
       const messages = buildModuleMessages(module, { prompt, sources: moduleSources, upstream, missingDependencies, requirements })
       const inputFingerprint = fingerprintModuleMessages(messages, 'v2')
-      const reusableInput = outsideTargetedRetry || saved?.inputFingerprint === inputFingerprint
-      if (reusableInput && saved?.output?.trim() && isNoAnalysisOutput(saved.output)) {
+      const reusableInput = outsideTargetedRetry || savedTask?.inputFingerprint === inputFingerprint
+      if (
+        reusableInput && saved?.output?.trim() &&
+        savedTask?.executionStatus === 'SUCCEEDED' &&
+        (savedTask.resultStatus === 'INSUFFICIENT' || isNoAnalysisOutput(saved.output))
+      ) {
         const output = normalizeNoAnalysisOutput(saved.output)
         updateModuleState(module.key, { status: 'skipped', message: output, updatedAt: saved.updatedAt })
         return
       }
-      if (reusableInput && saved?.status === 'complete' && saved.output?.trim()) {
+      if (
+        reusableInput && saved?.output?.trim() &&
+        savedTask?.executionStatus === 'SUCCEEDED' && savedTask.resultStatus === 'VALID'
+      ) {
         const output = module.key === 'material-review'
             ? normalizeMaterialReviewOutput(saved.output)
             : saved.output
