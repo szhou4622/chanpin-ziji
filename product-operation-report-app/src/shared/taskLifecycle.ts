@@ -1,3 +1,4 @@
+import { assertTaskIdentityKey } from './taskIdentity'
 import type {
   TaskDependencySnapshot,
   TaskExecutionStatus,
@@ -8,7 +9,12 @@ import type {
 import type { ModuleKey } from './types'
 
 export interface CreatePendingTaskInput {
+  /** Immutable id for this logical-task instance. */
   id: string
+  /** Stable business slot shared by replacement tasks. Defaults to id for compatibility. */
+  logicalKey?: string
+  /** Transitional key of the legacy payload carrier, when one still exists. */
+  payloadKey?: string
   kind: TaskKind
   dependencies?: TaskDependencySnapshot[]
   inputFingerprint?: string
@@ -46,9 +52,15 @@ export function createPendingTaskRecord(
   now: string = new Date().toISOString()
 ): TaskRecord {
   assertIsoDate(now, '任务创建时间')
+  assertTaskIdentityKey(input.id, '任务实例 ID')
+  const logicalKey = input.logicalKey || input.id
+  assertTaskIdentityKey(logicalKey, '任务 logicalKey')
+  if (input.payloadKey) assertTaskIdentityKey(input.payloadKey, '任务 payloadKey')
   return {
     schemaVersion: 1,
     id: input.id,
+    logicalKey,
+    payloadKey: input.payloadKey,
     kind: input.kind,
     executionStatus: 'PENDING',
     dependencies: [...(input.dependencies || [])],
