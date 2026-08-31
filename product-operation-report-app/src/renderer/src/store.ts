@@ -2660,6 +2660,7 @@ export const useStore = create<StoreState>((set, get) => ({
         await completeAsInsufficient(message)
         return
       }
+      if (analysisAbortGroup.isAborted()) return
       const shadowStartedAt = new Date().toISOString()
       try {
         set((state) => {
@@ -2755,7 +2756,10 @@ export const useStore = create<StoreState>((set, get) => ({
             1,
             { ...moduleTaskContext, stepId: `${module.key}-validation-retry-${validationPass}` }
           )
-          if (!corrected.ok || !corrected.text.trim()) break
+          if (!corrected.ok || !corrected.text.trim()) {
+            result = corrected
+            break
+          }
           result = corrected
           moduleOutput = module.key === 'material-review'
             ? normalizeMaterialReviewOutput(corrected.text)
@@ -2765,6 +2769,28 @@ export const useStore = create<StoreState>((set, get) => ({
             get()._post('assistant', `M${module.id} ${module.title}仍是过程说明或缺项，正在做最后一次结构纠正。`, 'narration')
           }
         }
+      }
+      if (validationErrors.length && isUserStop(result.error)) {
+        const message = result.error || '已停止'
+        const updatedAt = new Date().toISOString()
+        updateModuleState(module.key, { status: 'failed', message, updatedAt })
+        set((state) => {
+          const legacy = writeRuntimeTaskState(state.taskJournal, state.taskRecords, savedTaskId, {
+            kind: 'module', status: 'failed', output: moduleOutput, inputFingerprint, moduleKey: module.key, updatedAt
+          })
+          const shadow = finishShadowState(
+            state,
+            legacy.taskRecords,
+            { executionStatus: 'CANCELLED', errorClass: 'USER_STOP' },
+            updatedAt
+          )
+          return {
+            taskJournal: legacy.taskJournal,
+            taskRecords: shadow.taskRecords,
+            currentTaskByLogicalKey: shadow.currentTaskByLogicalKey
+          }
+        })
+        return
       }
       if (validationErrors.length) {
         const message = validationErrors.join('；')
