@@ -1,0 +1,55 @@
+name: Phase2 desktop server cancel verify
+
+on:
+  push:
+    branches:
+      - phase2/desktop-server-cancel
+    paths:
+      - '.github/workflows/phase2-desktop-server-cancel-verify.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: phase2/desktop-server-cancel
+          fetch-depth: 0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: product-operation-report-app/package-lock.json
+      - name: Apply desktop-to-server cancellation patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python .github/scripts/phase2-desktop-server-cancel.py
+          git diff --check
+      - name: Verify desktop lifecycle boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd product-operation-report-app
+          npm ci
+          npm run typecheck
+          npm run test:architecture
+          npm run test:unit
+      - name: Commit verified desktop cancellation bridge
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add product-operation-report-app/src/main/aiProxy.ts product-operation-report-app/src/main/index.ts
+          git diff --cached --check
+          if git diff --cached --quiet; then
+            echo 'No generated product changes to commit.'
+            exit 1
+          fi
+          git commit -m 'feat: propagate desktop cancellation to business server'
+          git push origin HEAD:phase2/desktop-server-cancel
