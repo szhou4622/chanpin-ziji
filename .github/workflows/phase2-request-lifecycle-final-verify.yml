@@ -1,0 +1,55 @@
+name: Phase2 request lifecycle final verify
+
+on:
+  push:
+    branches:
+      - phase2/request-lifecycle-foundation
+    paths:
+      - '.github/workflows/phase2-request-lifecycle-final-verify.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: phase2/request-lifecycle-foundation
+          fetch-depth: 0
+      - name: Apply complete request lifecycle foundation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python .github/scripts/phase2-request-lifecycle-foundation.py
+          python .github/scripts/phase2-request-lifecycle-test-alignment.py
+          python .github/scripts/phase2-request-active-lookup.py
+          git diff --check
+      - name: Run full server proxy regression suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m unittest discover -s server-updates/points-proxy-v1 -p 'test*.py' -v
+      - name: Verify lifecycle public routing and permanent CI guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'location ^~ /api/product-operation-report/v1/requests/' server-updates/points-proxy-v1/nginx-location.conf
+          grep -F 'proxy_pass http://127.0.0.1:8794/requests/' server-updates/points-proxy-v1/nginx-location.conf
+          grep -F 'name: Server proxy regression' .github/workflows/ci.yml
+          grep -F "python -m unittest discover -s server-updates/points-proxy-v1 -p 'test*.py' -v" .github/workflows/ci.yml
+      - name: Commit verified lifecycle foundation
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          if git diff --cached --quiet; then
+            echo 'No generated changes to commit.'
+            exit 1
+          fi
+          git commit -m 'feat: complete server request lifecycle foundation'
+          git push origin HEAD:phase2/request-lifecycle-foundation
