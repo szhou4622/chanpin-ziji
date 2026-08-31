@@ -19,12 +19,10 @@ jobs:
         with:
           ref: phase2/request-lifecycle-foundation
           fetch-depth: 0
-      - name: Apply complete request lifecycle foundation
+      - name: Apply active-task lookup and permanent CI guard
         shell: bash
         run: |
           set -euo pipefail
-          python .github/scripts/phase2-request-lifecycle-foundation.py
-          python .github/scripts/phase2-request-lifecycle-test-alignment.py
           python .github/scripts/phase2-request-active-lookup.py
           git diff --check
       - name: Run full server proxy regression suite
