@@ -1149,6 +1149,26 @@ def request_api_path(path: str) -> tuple[str, str] | None:
     return None
 
 
+def active_request_task_key(path: str) -> str | None:
+    parts = [part for part in path.split("/") if part]
+    if len(parts) == 3 and parts[0] == "requests" and parts[1] == "active" and SAFE_TEXT_RE.fullmatch(parts[2]):
+        return parts[2]
+    return None
+
+
+def active_requests_for_task(session: Session, task_key: str) -> list[dict[str, Any]]:
+    if not SAFE_TEXT_RE.fullmatch(task_key):
+        raise ApiError(400, "模型任务标识无效。")
+    with database() as db:
+        ensure_schema(db)
+        rows = db.execute(
+            "SELECT * FROM model_requests WHERE app_name=? AND code_id=? AND machine_code=? "
+            "AND task_key=? AND status='running' ORDER BY started_at",
+            (APP_NAME, session.code_id, session.machine_code, task_key),
+        ).fetchall()
+        return [request_state_payload(row) for row in rows]
+
+
 def request_state_payload(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "requestId": row["request_id"],
@@ -1768,6 +1788,11 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/pricing":
                 require_session(self.headers)
                 self.json_response(200, {"ok": True, "pricing": pricing()})
+                return
+            active_task_key = active_request_task_key(path)
+            if active_task_key:
+                session = require_session(self.headers)
+                self.json_response(200, {"ok": True, "requests": active_requests_for_task(session, active_task_key)})
                 return
             request_route = request_api_path(path)
             if request_route and request_route[1] == "status":

@@ -220,6 +220,37 @@ class RequestLifecycleTests(unittest.TestCase):
         self.assertEqual(items, [("cancelled", b"")])
         opener.assert_not_called()
 
+    def test_active_request_lookup_finds_running_task_without_prior_request_id(self) -> None:
+        task_key = "report-a:module:v2:product-info"
+        first_id = self.reserve(task_key)
+        active = proxy.active_requests_for_task(self.session, task_key)
+        self.assertEqual([item["requestId"] for item in active], [first_id])
+        self.assertEqual(active[0]["taskKey"], task_key)
+        self.assertEqual(active[0]["status"], "running")
+
+        proxy.settle_request(
+            self.session, first_id, "success", "gpt-5.5",
+            {"input_tokens": 1000, "output_tokens": 100, "cached_input_tokens": 0,
+             "cache_creation_input_tokens": 0},
+            1000, 300, True,
+        )
+        self.assertEqual(proxy.active_requests_for_task(self.session, task_key), [])
+
+    def test_active_request_lookup_is_scoped_to_current_license_and_machine(self) -> None:
+        task_key = "report-a:module:v2:audience"
+        self.reserve(task_key)
+        other = proxy.Session(
+            token_hash="other", code_id="MAIN-B", machine_code="MACHINE-B", license_id="MAIN-B",
+            device_credential="credential-b", device_session="session-b", expires_at=9_999_999_999,
+        )
+        self.assertEqual(proxy.active_requests_for_task(other, task_key), [])
+
+    def test_active_request_path_parser_accepts_only_safe_task_keys(self) -> None:
+        task_key = "report-a:module:v2:product-info"
+        self.assertEqual(proxy.active_request_task_key(f"/requests/active/{task_key}"), task_key)
+        self.assertIsNone(proxy.active_request_task_key("/requests/active/bad%2Ftask"))
+        self.assertIsNone(proxy.active_request_task_key("/requests/active/../../wallet"))
+
     def test_request_api_path_parser_accepts_only_canonical_request_ids(self) -> None:
         request_id = str(uuid.uuid4())
         self.assertEqual(proxy.request_api_path(f"/requests/{request_id}"), (request_id, "status"))
