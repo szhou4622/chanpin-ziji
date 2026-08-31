@@ -37,6 +37,7 @@ import { friendlyError } from './store/errors'
 import { buildProjectSnapshot } from './store/persistence'
 import { mergeRevisionParts, runFinalReportInParts, runModelRetry, selectRevisionParts } from './store/analysis'
 import { isTemporaryReservationContention, planCleaningConcurrency } from './store/cleaning'
+import { createAbortGroup } from './store/abortGroup'
 import { readRuntimeTaskState, removeRuntimeTaskState, writeRuntimeTaskState } from './store/taskJournalAdapter'
 import { completeModuleAsInsufficient } from './store/moduleOutcome'
 import {
@@ -2480,6 +2481,8 @@ export const useStore = create<StoreState>((set, get) => ({
     const sourceCountV1 = topLevelSourceCount(analysisSources)
     const imageCountV1 = sourceImageCount(analysisSources)
     const activeReportSessionId = sessionId
+    const analysisAbortGroup = createAbortGroup()
+    set({ abortFn: () => analysisAbortGroup.abortAll() })
     const updateModuleState = (key: ModuleKey, state: ModuleRunState): void => {
       set((current) => ({ moduleStates: { ...current.moduleStates, [key]: state } }))
     }
@@ -2500,12 +2503,31 @@ export const useStore = create<StoreState>((set, get) => ({
         )
       }
     }
+    const finishCancelledAnalysis = async (): Promise<void> => {
+      if (!isCurrentSession()) return
+      set({ phase: 'checkpoint1', abortFn: null })
+      get()._post(
+        'assistant',
+        '已停止6模块分析。已经完成的模块结果已保留，未完成或已取消的模块下次继续时会重新执行；本次不会再启动后续波次。',
+        'narration'
+      )
+      try {
+        await window.api.saveLastProject(buildProjectSnapshot(get()))
+      } catch (error) {
+        get()._post(
+          'assistant',
+          `停止状态已经生效，但本地项目快照保存失败：${friendlyError(error)}。当前窗口结果仍保留，请暂时不要关闭软件。`,
+          'error'
+        )
+      }
+    }
     const runModule = async (module: typeof REPORT_MODULES[number]): Promise<void> => {
       if (!isCurrentSession()) return
       const savedTaskId = `${sessionId}:module:v2:${module.key}`
       const savedState = readRuntimeTaskState(get().taskJournal, get().taskRecords, savedTaskId)
       const saved = savedState.journal
       const savedTask = savedState.task
+      const setModuleAbort = analysisAbortGroup.createRegistrar()
       let shadowTaskId: string | undefined
       const finishShadowState = (
         state: StoreState,
@@ -2679,9 +2701,7 @@ export const useStore = create<StoreState>((set, get) => ({
       let result = await runModelRetry(
         messages,
         () => {},
-        (fn) => {
-          if (isCurrentSession()) set({ abortFn: fn })
-        },
+        setModuleAbort,
         (attempt) => {
           if (isCurrentSession()) get()._post('assistant', `M${module.id} ${module.title}连接中断，正在重试（第${attempt}次）…`, 'narration')
         },
@@ -2730,9 +2750,7 @@ export const useStore = create<StoreState>((set, get) => ({
               }
             ],
             () => {},
-            (fn) => {
-              if (isCurrentSession()) set({ abortFn: fn })
-            },
+            setModuleAbort,
             undefined,
             1,
             { ...moduleTaskContext, stepId: `${module.key}-validation-retry-${validationPass}` }
@@ -2800,6 +2818,10 @@ export const useStore = create<StoreState>((set, get) => ({
     const executionBatches = buildModuleExecutionBatches(REPORT_MODULES)
     for (const [batchIndex, runnable] of executionBatches.entries()) {
       if (!isCurrentSession() || get().phase !== 'analyzing') return
+      if (analysisAbortGroup.isAborted()) {
+        await finishCancelledAnalysis()
+        return
+      }
       get()._post(
         'assistant',
         `正在执行第${batchIndex + 1}/${executionBatches.length}波：${runnable.map((module) => `M${module.id} ${module.title}`).join('、')}`,
@@ -2842,6 +2864,10 @@ export const useStore = create<StoreState>((set, get) => ({
             currentTaskByLogicalKey: shadow.currentTaskByLogicalKey
           }
         })
+      }
+      if (analysisAbortGroup.isAborted()) {
+        await finishCancelledAnalysis()
+        return
       }
     }
     if (!isCurrentSession()) return
