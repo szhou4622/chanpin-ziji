@@ -19,7 +19,7 @@ jobs:
         with:
           ref: phase2/request-lifecycle-foundation
           fetch-depth: 0
-      - name: Apply active-task lookup and permanent CI guard
+      - name: Apply remaining active-task lookup and permanent CI guard
         shell: bash
         run: |
           set -euo pipefail
