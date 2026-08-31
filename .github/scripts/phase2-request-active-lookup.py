@@ -37,5 +37,5 @@ test_path.write_text(test, encoding='utf-8')
 ci_path = Path('.github/workflows/ci.yml')
 ci = ci_path.read_text(encoding='utf-8')
 if 'name: Server proxy regression' not in ci:
-    ci = ci.rstrip() + '''\n\n  server-regression:\n    name: Server proxy regression\n    runs-on: ubuntu-latest\n    timeout-minutes: 10\n    steps:\n      - name: Check out source\n        uses: actions/checkout@v6\n\n      - name: Run server proxy tests\n        run: python -m unittest discover -s server-updates/points-proxy-v1 -p 'test*.py' -v\n''' + '\n'
+    ci = ci.rstrip() + '''\n\n  server-regression:\n    name: Server proxy regression\n    runs-on: ubuntu-latest\n    timeout-minutes: 10\n    steps:\n      - name: Check out source\n        uses: actions/checkout@v6\n\n      - name: Run server proxy tests\n        run: python -m unittest discover -s server-updates/points-proxy-v1 -p 'test*.py' -v\n'''
 ci_path.write_text(ci, encoding='utf-8')
