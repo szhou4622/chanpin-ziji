@@ -1,6 +1,13 @@
 import type { ModelProfile, PointsLedgerEntry, PointsWalletStatus } from '../shared/types'
 import { getLicenseProxyIdentity } from './activation'
 import { AI_PROXY_BASE_URL, AI_PROXY_HEALTH_URL, AI_PROXY_SESSION_URL, NETWORK_TIMEOUT_MS } from './serviceConfig'
+import {
+  assertSafeProxyRequestId,
+  assertSafeProxyTaskKey,
+  parseProxyRequestState,
+  parseProxyRequestStates,
+  type ProxyRequestState
+} from './proxyRequestLifecycle'
 
 interface ProxySession {
   token: string
@@ -81,6 +88,63 @@ export async function getAiProxyToken(force = false): Promise<string> {
   if (!force && cachedSession && cachedSession.expiresAt - Date.now() > 30_000) return cachedSession.token
   cachedSession = await createSession()
   return cachedSession.token
+}
+
+type AuthorizedProxyRequestInit = Omit<RequestInit, 'headers'> & { headers?: Record<string, string> }
+
+async function authorizedProxyJson(path: string, init: AuthorizedProxyRequestInit): Promise<Record<string, unknown>> {
+  const request = async (forceSession: boolean): Promise<Record<string, unknown>> => {
+    const token = await getAiProxyToken(forceSession)
+    return jsonRequest(`${AI_PROXY_BASE_URL}${path}`, {
+      ...init,
+      headers: {
+        accept: 'application/json',
+        ...(init.headers || {}),
+        authorization: `Bearer ${token}`
+      }
+    })
+  }
+  try {
+    return await request(false)
+  } catch (error) {
+    if (!(error instanceof ProxyHttpError) || error.status !== 401) throw error
+    clearAiProxySession()
+    return request(true)
+  }
+}
+
+export async function fetchProxyRequestState(requestId: string): Promise<ProxyRequestState> {
+  const safeRequestId = assertSafeProxyRequestId(requestId)
+  const body = await authorizedProxyJson(`/requests/${safeRequestId}`, { method: 'GET' })
+  return parseProxyRequestState(body.request)
+}
+
+export async function fetchActiveProxyRequests(taskKey: string): Promise<ProxyRequestState[]> {
+  const safeTaskKey = assertSafeProxyTaskKey(taskKey)
+  // The server deliberately accepts only its SAFE_TEXT_RE alphabet here. Do not encode ':' into %3A.
+  const body = await authorizedProxyJson(`/requests/active/${safeTaskKey}`, { method: 'GET' })
+  return parseProxyRequestStates(body.requests)
+}
+
+export async function cancelProxyRequest(requestId: string): Promise<ProxyRequestState> {
+  const safeRequestId = assertSafeProxyRequestId(requestId)
+  const body = await authorizedProxyJson(`/requests/${safeRequestId}/cancel`, { method: 'POST' })
+  return parseProxyRequestState(body.request)
+}
+
+export async function cancelProxyTask(taskKey: string, preferredRequestId?: string): Promise<ProxyRequestState[]> {
+  const safeTaskKey = assertSafeProxyTaskKey(taskKey)
+  if (preferredRequestId) {
+    try {
+      const preferred = await cancelProxyRequest(preferredRequestId)
+      if (preferred.status === 'running') return [preferred]
+    } catch (error) {
+      if (!(error instanceof ProxyHttpError) || error.status !== 404) throw error
+    }
+  }
+  const active = await fetchActiveProxyRequests(safeTaskKey)
+  if (!active.length) return []
+  return Promise.all(active.map((request) => cancelProxyRequest(request.requestId)))
 }
 
 export function clearAiProxySession(): void {

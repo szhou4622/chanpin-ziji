@@ -79,11 +79,13 @@ import { ChatRequestRegistry, validateChatStartPayload } from './chatAdmission'
 import { getCachedContactState, refreshContactConfig } from './contact'
 import {
   authorizeProxyProfiles,
+  cancelProxyTask,
   clearAiProxySession,
   clearProxyWalletSnapshot,
   fetchProxyWallet,
   testProxyHealth
 } from './aiProxy'
+import { ProxyRequestTracker, type TrackedProxyRequest } from './proxyRequestLifecycle'
 
 const developmentUserDataDir =
   !app.isPackaged && process.env.PRODUCT_REPORT_ALLOW_DEV_OVERRIDES === '1'
@@ -218,6 +220,7 @@ function createWindow(): void {
   let closePromptOpen = false
   const finishClose = (): void => {
     cancelParsingForOwner(ownerId, '软件正在关闭，文件解析已停止。')
+    cancelProxyRequestsForOwner(ownerId)
     chatRequests.abortOwner(ownerId)
     if (process.platform !== 'darwin') armHardExitWatchdog()
     forceClose = true
@@ -267,12 +270,14 @@ function createWindow(): void {
 
   window.webContents.on('render-process-gone', () => {
     cancelParsingForOwner(ownerId, '界面已重新加载，旧文件解析已停止。')
+    cancelProxyRequestsForOwner(ownerId)
     chatRequests.abortOwner(ownerId)
   })
 
   window.on('ready-to-show', () => window.show())
   window.on('closed', () => {
     cancelParsingForOwner(ownerId, '窗口已关闭，旧文件解析已停止。')
+    cancelProxyRequestsForOwner(ownerId)
     chatRequests.abortOwner(ownerId)
     if (mainWindow === window) mainWindow = null
   })
@@ -607,6 +612,21 @@ ipcMain.handle('export:html', async (_e, p: { content: string; name: string }) =
 
 // ---- IPC：流式聊天 ----
 const chatRequests = new ChatRequestRegistry(4)
+const proxyRequests = new ProxyRequestTracker()
+
+function bestEffortCancelProxyRequest(request: TrackedProxyRequest): void {
+  void cancelProxyTask(request.taskKey, request.currentRequestId).catch((error) => {
+    console.error('Unable to propagate model cancellation to business server:', error)
+  })
+}
+
+function cancelProxyRequestsForOwner(ownerId: number): void {
+  for (const request of proxyRequests.drainOwner(ownerId)) bestEffortCancelProxyRequest(request)
+}
+
+function cancelAllProxyRequests(): void {
+  for (const request of proxyRequests.drainAll()) bestEffortCancelProxyRequest(request)
+}
 
 ipcMain.on(
   'chat:start',
@@ -678,7 +698,10 @@ ipcMain.on(
     const controller = new AbortController()
     try {
       chatRequests.claim(id, event.sender.id, controller)
+      if (managedState.mode === 'proxy') proxyRequests.claim(id, event.sender.id, context.taskKey)
     } catch (error) {
+      chatRequests.release(id, event.sender.id, controller)
+      proxyRequests.release(id, event.sender.id)
       event.sender.send(channel, {
         type: 'error',
         message: error instanceof Error ? error.message : '模型任务暂时无法开始。',
@@ -710,7 +733,17 @@ ipcMain.on(
         }
       }
       const sequence = await runModelFallbackSequence(profiles, async (profile, profileIndex) => {
+        if (controller.signal.aborted) {
+          return {
+            terminal: { type: 'error', message: '已停止', usage: emptyUsage(profile.model) },
+            failureKind: 'aborted',
+            outputChars: 0,
+            hasVisibleOutput: false,
+            aborted: true
+          }
+        }
         const attemptRequestId = profileIndex === 0 ? id : `${id}:fallback:${profileIndex}`
+        if (managedState.mode === 'proxy') proxyRequests.setCurrent(id, event.sender.id, attemptRequestId)
         const startedAt = new Date().toISOString()
         const startedRecord: TokenUsageRecord = {
           schemaVersion: 1,
@@ -861,13 +894,17 @@ ipcMain.on(
       }, context.taskType)
       if (!event.sender.isDestroyed()) event.sender.send(channel, sequence.outcome.terminal)
     } finally {
+      proxyRequests.release(id, event.sender.id)
       chatRequests.release(id, event.sender.id, controller)
     }
   }
 )
 
 ipcMain.on('chat:abort', (event, id: string) => {
-  if (typeof id === 'string') chatRequests.abort(id, event.sender.id)
+  if (typeof id !== 'string') return
+  const tracked = proxyRequests.get(id, event.sender.id)
+  chatRequests.abort(id, event.sender.id)
+  if (tracked) bestEffortCancelProxyRequest(tracked)
 })
 
 // 应用菜单：提供标准编辑角色，让复制/剪切/粘贴/全选快捷键生效
@@ -909,6 +946,7 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   armHardExitWatchdog()
+  cancelAllProxyRequests()
   chatRequests.abortAll()
   disposeParseService()
 })
