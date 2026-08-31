@@ -35,7 +35,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          grep -F 'location ~ ^/api/product-operation-report/v1/requests/' server-updates/points-proxy-v1/nginx-location.conf
+          grep -F 'location ^~ /api/product-operation-report/v1/requests/' server-updates/points-proxy-v1/nginx-location.conf
           grep -F 'proxy_pass http://127.0.0.1:8794/requests/' server-updates/points-proxy-v1/nginx-location.conf
       - name: Commit verified request lifecycle foundation
         shell: bash
