@@ -19,6 +19,7 @@ import type {
   ReportEngineVersion
 } from '../../shared/types'
 import { REPORT_MODULES, REPORT_MODULES_V2, SOP_STEPS } from '../../shared/types'
+import { sanitizeTaskCurrentIndex, type TaskCurrentIndex } from '../../shared/taskCurrentIndex'
 import { reconcileTaskRecordMirror, type TaskRecord } from '../../shared/taskModel'
 import { FINAL_REPORT_PARTS } from './reportTemplate'
 import {
@@ -760,6 +761,7 @@ interface StoreState {
   artifacts: Record<number, string>
   taskJournal: Record<string, ProjectTaskSnapshot>
   taskRecords: Record<string, TaskRecord>
+  currentTaskByLogicalKey: TaskCurrentIndex
   reportMarkdown: string
   reportStale: boolean
   abortFn: (() => void) | null
@@ -815,7 +817,7 @@ interface StoreState {
 
 const invalidatedAnalysis = (): Pick<
   StoreState,
-  'cleanedData' | 'phase' | 'abortFn' | 'exportStatus' | 'cleaningProgress' | 'reportReuseOffer' | 'taskJournal' | 'taskRecords' | 'moduleStates'
+  'cleanedData' | 'phase' | 'abortFn' | 'exportStatus' | 'cleaningProgress' | 'reportReuseOffer' | 'taskJournal' | 'taskRecords' | 'currentTaskByLogicalKey' | 'moduleStates'
 > => ({
   cleanedData: '',
   phase: 'idle',
@@ -825,6 +827,7 @@ const invalidatedAnalysis = (): Pick<
   reportReuseOffer: null,
   taskJournal: {},
   taskRecords: {},
+  currentTaskByLogicalKey: {},
   moduleStates: {}
 })
 
@@ -857,6 +860,7 @@ export const useStore = create<StoreState>((set, get) => ({
   artifacts: {},
   taskJournal: {},
   taskRecords: {},
+  currentTaskByLogicalKey: {},
   reportMarkdown: '',
   reportStale: false,
   abortFn: null,
@@ -1081,6 +1085,10 @@ export const useStore = create<StoreState>((set, get) => ({
       restoredSourceState.sources
     )
     const restoredTaskRecords = reconcileTaskRecordMirror(restoredTaskJournal, lastProject?.taskRecords || {})
+    const restoredCurrentTaskByLogicalKey = sanitizeTaskCurrentIndex(
+      lastProject?.currentTaskByLogicalKey,
+      restoredTaskRecords
+    )
     set({
       initialized: true,
       persistencePaused: false,
@@ -1098,6 +1106,7 @@ export const useStore = create<StoreState>((set, get) => ({
       artifacts: restoredArtifacts,
       taskJournal: restoredTaskJournal,
       taskRecords: restoredTaskRecords,
+      currentTaskByLogicalKey: restoredCurrentTaskByLogicalKey,
       reportMarkdown: restoredReport,
       reportStale: Boolean(lastProject?.reportStale),
       phase: lastProject ? restorePhase(lastProject) : 'idle',
@@ -1144,6 +1153,7 @@ export const useStore = create<StoreState>((set, get) => ({
       artifacts: current.artifacts,
       taskJournal: current.taskJournal,
       taskRecords: current.taskRecords,
+      currentTaskByLogicalKey: current.currentTaskByLogicalKey,
       reportMarkdown: current.reportMarkdown,
       reportStale: current.reportStale,
       phase: current.phase,
@@ -1177,6 +1187,7 @@ export const useStore = create<StoreState>((set, get) => ({
       artifacts: {} as Record<number, string>,
       taskJournal: {} as Record<string, ProjectTaskSnapshot>,
       taskRecords: {} as Record<string, TaskRecord>,
+      currentTaskByLogicalKey: {} as TaskCurrentIndex,
       reportMarkdown: '',
       reportStale: false,
       phase: 'idle' as Phase,
@@ -1293,6 +1304,10 @@ export const useStore = create<StoreState>((set, get) => ({
 
     const restoredPreviousTaskJournal = previous.taskJournal || {}
     const restoredPreviousTaskRecords = reconcileTaskRecordMirror(restoredPreviousTaskJournal, previous.taskRecords || {})
+    const restoredPreviousCurrentTaskByLogicalKey = sanitizeTaskCurrentIndex(
+      previous.currentTaskByLogicalKey,
+      restoredPreviousTaskRecords
+    )
 
     const restoredState = {
       sources: previous.sources.map((source) => ({
@@ -1309,6 +1324,7 @@ export const useStore = create<StoreState>((set, get) => ({
       artifacts: restoredArtifacts,
       taskJournal: restoredPreviousTaskJournal,
       taskRecords: restoredPreviousTaskRecords,
+      currentTaskByLogicalKey: restoredPreviousCurrentTaskByLogicalKey,
       reportMarkdown: restoredReport,
       reportStale: Boolean(previous.reportStale),
       phase: restorePhase(previous),
