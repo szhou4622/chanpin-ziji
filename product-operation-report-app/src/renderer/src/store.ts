@@ -40,6 +40,12 @@ import { isTemporaryReservationContention, planCleaningConcurrency } from './sto
 import { readRuntimeTaskState, removeRuntimeTaskState, writeRuntimeTaskState } from './store/taskJournalAdapter'
 import { completeModuleAsInsufficient } from './store/moduleOutcome'
 import {
+  failCurrentRunningModuleShadowTask,
+  finishModuleShadowTask,
+  startModuleShadowTask,
+  type ModuleShadowOutcome
+} from './store/moduleTaskShadow'
+import {
   buildCleaningPlan,
   type CleaningMethod,
   type CleaningPlan
@@ -2474,12 +2480,40 @@ export const useStore = create<StoreState>((set, get) => ({
       set((current) => ({ moduleStates: { ...current.moduleStates, [key]: state } }))
     }
     const moduleByKey = new Map(REPORT_MODULES.map((module) => [module.key, module]))
+    const activeModuleShadowTaskIds = new Map<ModuleKey, string>()
     const runModule = async (module: typeof REPORT_MODULES[number]): Promise<void> => {
       if (!isCurrentSession()) return
       const savedTaskId = `${sessionId}:module:v2:${module.key}`
       const savedState = readRuntimeTaskState(get().taskJournal, get().taskRecords, savedTaskId)
       const saved = savedState.journal
       const savedTask = savedState.task
+      let shadowTaskId: string | undefined
+      const finishShadowState = (
+        state: StoreState,
+        taskRecords: Record<string, TaskRecord>,
+        outcome: ModuleShadowOutcome,
+        updatedAt: string
+      ): { taskRecords: Record<string, TaskRecord>; currentTaskByLogicalKey: TaskCurrentIndex } => {
+        if (!shadowTaskId) {
+          return { taskRecords, currentTaskByLogicalKey: state.currentTaskByLogicalKey }
+        }
+        try {
+          const shadow = finishModuleShadowTask(
+            taskRecords,
+            state.currentTaskByLogicalKey,
+            savedTaskId,
+            shadowTaskId,
+            outcome,
+            updatedAt
+          )
+          activeModuleShadowTaskIds.delete(module.key)
+          return shadow
+        } catch {
+          activeModuleShadowTaskIds.delete(module.key)
+          shadowTaskId = undefined
+          return { taskRecords, currentTaskByLogicalKey: state.currentTaskByLogicalKey }
+        }
+      }
       const completeAsInsufficient = async (message: string, inputFingerprint?: string): Promise<string> => {
         const updatedAt = new Date().toISOString()
         let output = message
@@ -2494,9 +2528,16 @@ export const useStore = create<StoreState>((set, get) => ({
             inputFingerprint
           )
           output = outcome.output
+          const shadow = finishShadowState(
+            state,
+            outcome.taskRecords,
+            { executionStatus: 'SUCCEEDED', resultStatus: 'INSUFFICIENT' },
+            updatedAt
+          )
           return {
             taskJournal: outcome.taskJournal,
-            taskRecords: outcome.taskRecords,
+            taskRecords: shadow.taskRecords,
+            currentTaskByLogicalKey: shadow.currentTaskByLogicalKey,
             moduleStates: { ...state.moduleStates, [module.key]: outcome.moduleState }
           }
         })
@@ -2578,6 +2619,34 @@ export const useStore = create<StoreState>((set, get) => ({
         await completeAsInsufficient(message)
         return
       }
+      const shadowStartedAt = new Date().toISOString()
+      try {
+        set((state) => {
+          const shadow = startModuleShadowTask(
+            state.taskRecords,
+            state.currentTaskByLogicalKey,
+            {
+              logicalKey: savedTaskId,
+              payloadKey: savedTaskId,
+              moduleKey: module.key,
+              inputFingerprint,
+              instanceToken: crypto.randomUUID(),
+              now: shadowStartedAt
+            }
+          )
+          shadowTaskId = shadow.taskId
+          activeModuleShadowTaskIds.set(module.key, shadow.taskId)
+          return {
+            taskRecords: shadow.taskRecords,
+            currentTaskByLogicalKey: shadow.currentTaskByLogicalKey
+          }
+        })
+        void window.api.saveLastProject(buildProjectSnapshot(get())).catch(() => undefined)
+      } catch {
+        // Shadow lifecycle is observational in Phase 1B and must never block production execution.
+        shadowTaskId = undefined
+        activeModuleShadowTaskIds.delete(module.key)
+      }
       const moduleTaskContext = {
         reportSessionId: activeReportSessionId,
         taskType: MODULE_TASK_TYPES[module.key],
@@ -2603,12 +2672,26 @@ export const useStore = create<StoreState>((set, get) => ({
       if (!isCurrentSession()) return
       if (!result.ok || !result.text.trim()) {
         const message = result.error || '模块没有返回内容'
-        updateModuleState(module.key, { status: 'failed', message, updatedAt: new Date().toISOString() })
-        set((state) => ({
-          ...writeRuntimeTaskState(state.taskJournal, state.taskRecords, savedTaskId, {
-            kind: 'module', status: 'failed', output: result.text, inputFingerprint, moduleKey: module.key
+        const updatedAt = new Date().toISOString()
+        updateModuleState(module.key, { status: 'failed', message, updatedAt })
+        set((state) => {
+          const legacy = writeRuntimeTaskState(state.taskJournal, state.taskRecords, savedTaskId, {
+            kind: 'module', status: 'failed', output: result.text, inputFingerprint, moduleKey: module.key, updatedAt
           })
-        }))
+          const shadow = finishShadowState(
+            state,
+            legacy.taskRecords,
+            isUserStop(result.error)
+              ? { executionStatus: 'CANCELLED', errorClass: 'USER_STOP' }
+              : { executionStatus: 'FAILED', errorClass: 'MODEL_REQUEST_FAILED' },
+            updatedAt
+          )
+          return {
+            taskJournal: legacy.taskJournal,
+            taskRecords: shadow.taskRecords,
+            currentTaskByLogicalKey: shadow.currentTaskByLogicalKey
+          }
+        })
         return
       }
       let moduleOutput = module.key === 'material-review'
@@ -2648,26 +2731,50 @@ export const useStore = create<StoreState>((set, get) => ({
       }
       if (validationErrors.length) {
         const message = validationErrors.join('；')
-        updateModuleState(module.key, { status: 'failed', message, updatedAt: new Date().toISOString() })
-        set((state) => ({
-          ...writeRuntimeTaskState(state.taskJournal, state.taskRecords, savedTaskId, {
-            kind: 'module', status: 'failed', output: moduleOutput, inputFingerprint, moduleKey: module.key
+        const updatedAt = new Date().toISOString()
+        updateModuleState(module.key, { status: 'failed', message, updatedAt })
+        set((state) => {
+          const legacy = writeRuntimeTaskState(state.taskJournal, state.taskRecords, savedTaskId, {
+            kind: 'module', status: 'failed', output: moduleOutput, inputFingerprint, moduleKey: module.key, updatedAt
           })
-        }))
+          const shadow = finishShadowState(
+            state,
+            legacy.taskRecords,
+            { executionStatus: 'FAILED', errorClass: 'VALIDATION_FAILED' },
+            updatedAt
+          )
+          return {
+            taskJournal: legacy.taskJournal,
+            taskRecords: shadow.taskRecords,
+            currentTaskByLogicalKey: shadow.currentTaskByLogicalKey
+          }
+        })
         return
       }
       if (isNoAnalysisOutput(moduleOutput)) {
         await completeAsInsufficient(normalizeNoAnalysisOutput(moduleOutput), inputFingerprint)
         return
       }
-      set((state) => ({
-        artifacts: { ...state.artifacts, [module.id]: moduleOutput },
-        ...writeRuntimeTaskState(state.taskJournal, state.taskRecords, savedTaskId, {
+      const completedAt = new Date().toISOString()
+      set((state) => {
+        const legacy = writeRuntimeTaskState(state.taskJournal, state.taskRecords, savedTaskId, {
           kind: 'module', status: 'complete', output: moduleOutput, inputFingerprint,
-          resultStatus: 'VALID', moduleKey: module.key
+          resultStatus: 'VALID', moduleKey: module.key, updatedAt: completedAt
         })
-      }))
-      updateModuleState(module.key, { status: 'done', updatedAt: new Date().toISOString() })
+        const shadow = finishShadowState(
+          state,
+          legacy.taskRecords,
+          { executionStatus: 'SUCCEEDED', resultStatus: 'VALID' },
+          completedAt
+        )
+        return {
+          artifacts: { ...state.artifacts, [module.id]: moduleOutput },
+          taskJournal: legacy.taskJournal,
+          taskRecords: shadow.taskRecords,
+          currentTaskByLogicalKey: shadow.currentTaskByLogicalKey
+        }
+      })
+      updateModuleState(module.key, { status: 'done', updatedAt: completedAt })
       await window.api.saveLastProject(buildProjectSnapshot(get()))
     }
 
@@ -2685,12 +2792,37 @@ export const useStore = create<StoreState>((set, get) => ({
         const module = runnable[index]
         const message = friendlyError(result.reason)
         const taskId = `${sessionId}:module:v2:${module.key}`
-        updateModuleState(module.key, { status: 'failed', message, updatedAt: new Date().toISOString() })
-        set((state) => ({
-          ...writeRuntimeTaskState(state.taskJournal, state.taskRecords, taskId, {
-            kind: 'module', status: 'failed', moduleKey: module.key
+        const updatedAt = new Date().toISOString()
+        updateModuleState(module.key, { status: 'failed', message, updatedAt })
+        const expectedShadowTaskId = activeModuleShadowTaskIds.get(module.key)
+        set((state) => {
+          const legacy = writeRuntimeTaskState(state.taskJournal, state.taskRecords, taskId, {
+            kind: 'module', status: 'failed', moduleKey: module.key, updatedAt
           })
-        }))
+          let shadow = {
+            taskRecords: legacy.taskRecords,
+            currentTaskByLogicalKey: state.currentTaskByLogicalKey
+          }
+          if (expectedShadowTaskId && state.currentTaskByLogicalKey[taskId] === expectedShadowTaskId) {
+            try {
+              shadow = failCurrentRunningModuleShadowTask(
+                legacy.taskRecords,
+                state.currentTaskByLogicalKey,
+                taskId,
+                updatedAt,
+                'UNHANDLED'
+              )
+            } catch {
+              // Shadow lifecycle remains observational and cannot replace the production failure path.
+            }
+          }
+          activeModuleShadowTaskIds.delete(module.key)
+          return {
+            taskJournal: legacy.taskJournal,
+            taskRecords: shadow.taskRecords,
+            currentTaskByLogicalKey: shadow.currentTaskByLogicalKey
+          }
+        })
       }
     }
     if (!isCurrentSession()) return

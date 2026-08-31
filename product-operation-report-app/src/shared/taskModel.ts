@@ -296,6 +296,19 @@ export function projectLegacyTaskJournal(
   )
 }
 
+function completedTaskHasVerifiedPayload(
+  canonical: TaskRecord,
+  journal: Readonly<Record<string, ProjectTaskSnapshot>>
+): boolean {
+  if (canonical.executionStatus !== 'SUCCEEDED' || !canonical.payloadKey) return false
+  const payload = journal[canonical.payloadKey]
+  if (!payload || payload.status !== 'complete') return false
+  if (LEGACY_KIND_MAP[payload.kind] !== canonical.kind) return false
+  if (payload.updatedAt !== canonical.updatedAt) return false
+  if (canonical.inputFingerprint && payload.inputFingerprint !== canonical.inputFingerprint) return false
+  return true
+}
+
 /**
  * Reconciles legacy payload-backed tasks with canonical task metadata.
  *
@@ -305,8 +318,10 @@ export function projectLegacyTaskJournal(
  *   scheduler states do not have a legacy journal representation.
  * - A persisted RUNNING task is recovered as PAUSED because the process that owned
  *   the execution no longer exists after application restart.
- * - A canonical-only SUCCEEDED task is rejected here: completed output must remain
- *   tied to a verified payload/output migration rather than metadata alone.
+ * - A completed immutable Task instance may survive only when payloadKey points to
+ *   a complete legacy payload with the same kind, input fingerprint and updatedAt.
+ *   This keeps the compatibility bridge fail-closed: metadata alone cannot prove a
+ *   completed business result exists.
  */
 export function reconcileTaskRecordMirror(
   journal: Readonly<Record<string, ProjectTaskSnapshot>>,
@@ -320,7 +335,11 @@ export function reconcileTaskRecordMirror(
     }
   }
   for (const [taskId, canonical] of Object.entries(persisted)) {
-    if (journal[taskId] || canonical.id !== taskId || canonical.executionStatus === 'SUCCEEDED') continue
+    if (journal[taskId] || canonical.id !== taskId) continue
+    if (canonical.executionStatus === 'SUCCEEDED') {
+      if (completedTaskHasVerifiedPayload(canonical, journal)) projected[taskId] = canonical
+      continue
+    }
     projected[taskId] = canonical.executionStatus === 'RUNNING'
       ? {
           ...canonical,
