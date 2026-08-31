@@ -463,14 +463,26 @@ class ProxyLedgerTests(unittest.TestCase):
         self.assertEqual(request["status"], "success")
         self.assertEqual(request["charged_milli"], 0)
 
-    def test_missing_usage_with_content_is_not_free(self) -> None:
+    def test_missing_usage_with_content_releases_reservation_without_user_charge(self) -> None:
         request_id = "f82324d3-df4f-42a4-badb-e0ba393b8f3f"
         proxy.reserve_request(self.session, request_id, "report-b", "part:1", "final_part", "gpt-5.5", 1, 1200)
         proxy.settle_request(self.session, request_id, "aborted", "gpt-5.5", None, 1200, 2400, True)
         with proxy.database() as db:
-            row = db.execute("SELECT usage_source,charged_milli FROM model_requests WHERE request_id=?", (request_id,)).fetchone()
-        self.assertEqual(row["usage_source"], "estimated")
-        self.assertGreater(row["charged_milli"], 0)
+            row = db.execute(
+                "SELECT status,usage_source,charged_milli,input_tokens,output_tokens FROM model_requests WHERE request_id=?",
+                (request_id,),
+            ).fetchone()
+            wallet = db.execute(
+                "SELECT balance_milli,locked_milli FROM wallets WHERE code_id=?", (self.session.code_id,)
+            ).fetchone()
+        self.assertEqual(row["status"], "aborted")
+        self.assertEqual(row["usage_source"], "missing")
+        self.assertEqual(row["charged_milli"], 0)
+        self.assertEqual(row["input_tokens"], 0)
+        self.assertEqual(row["output_tokens"], 0)
+        self.assertEqual(wallet["balance_milli"], 500_000)
+        self.assertEqual(wallet["locked_milli"], 0)
+        self.consume_mock.assert_not_called()
 
     def test_old_machine_session_is_revoked_after_wallet_rebind(self) -> None:
         raw = "temporary-session-token"
@@ -573,7 +585,7 @@ class ProxyLedgerTests(unittest.TestCase):
         finally:
             proxy.DAILY_COST_LIMIT_CNY = original_limit
 
-    def test_empty_or_zero_provider_usage_falls_back_to_estimation(self) -> None:
+    def test_empty_or_zero_provider_usage_is_not_verified_usage(self) -> None:
         self.assertIsNone(proxy.provider_usage({"usage": {}}))
         self.assertIsNone(proxy.provider_usage({
             "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
@@ -595,7 +607,7 @@ class ProxyLedgerTests(unittest.TestCase):
             "response_model": "",
         })
 
-    def test_restart_conservatively_settles_submitted_requests(self) -> None:
+    def test_restart_releases_submitted_request_when_provider_usage_is_unrecoverable(self) -> None:
         request_id = "d57e23b0-2e3f-4b3b-8af2-000000000001"
         proxy.reserve_request(
             self.session, request_id, "report-crash", "summary:crash", "summary", "gpt-5.5", 1, 1400
@@ -604,27 +616,20 @@ class ProxyLedgerTests(unittest.TestCase):
         proxy.recover_interrupted_requests()
         with proxy.database() as db:
             request = db.execute(
-                "SELECT status,usage_source,charged_milli FROM model_requests WHERE request_id=?", (request_id,)
+                "SELECT status,usage_source,charged_milli,input_tokens,output_tokens FROM model_requests WHERE request_id=?",
+                (request_id,),
             ).fetchone()
             wallet = db.execute(
                 "SELECT balance_milli,locked_milli FROM wallets WHERE code_id=?", (self.session.code_id,)
             ).fetchone()
-        self.assertEqual(request["status"], "billing_pending")
-        self.assertEqual(request["usage_source"], "estimated")
-        self.assertGreater(request["charged_milli"], 0)
-        self.assertGreater(wallet["locked_milli"], 0)
-        self.assertEqual(wallet["balance_milli"], 500_000)
-        proxy.retry_pending_billing(self.session)
-        with proxy.database() as db:
-            request = db.execute(
-                "SELECT status FROM model_requests WHERE request_id=?", (request_id,)
-            ).fetchone()
-            wallet = db.execute(
-                "SELECT balance_milli,locked_milli FROM wallets WHERE code_id=?", (self.session.code_id,)
-            ).fetchone()
-        self.assertEqual(request["status"], "interrupted_estimated")
+        self.assertEqual(request["status"], "interrupted")
+        self.assertEqual(request["usage_source"], "missing")
+        self.assertEqual(request["charged_milli"], 0)
+        self.assertEqual(request["input_tokens"], 0)
+        self.assertEqual(request["output_tokens"], 0)
         self.assertEqual(wallet["locked_milli"], 0)
-        self.assertLess(wallet["balance_milli"], 500_000)
+        self.assertEqual(wallet["balance_milli"], 500_000)
+        self.consume_mock.assert_not_called()
 
     def test_response_model_mismatch_uses_the_more_conservative_price(self) -> None:
         requested_charge, requested_cost = proxy.points_for_usage("claude-sonnet-4-6", 100_000, 20_000)
