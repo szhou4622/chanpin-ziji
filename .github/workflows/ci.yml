@@ -71,3 +71,14 @@ jobs:
 
       - name: Run core regression suite
         run: npm run test:regression
+
+  server-regression:
+    name: Server proxy regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Run server proxy tests
+        run: python -m unittest discover -s server-updates/points-proxy-v1 -p 'test*.py' -v
