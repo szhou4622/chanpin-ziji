@@ -40,6 +40,10 @@ import { isTemporaryReservationContention, planCleaningConcurrency } from './sto
 import { readRuntimeTaskState, removeRuntimeTaskState, writeRuntimeTaskState } from './store/taskJournalAdapter'
 import { completeModuleAsInsufficient } from './store/moduleOutcome'
 import {
+  completedModulePersistenceWarning,
+  persistCompletedModuleSnapshot
+} from './store/modulePersistence'
+import {
   failCurrentRunningModuleShadowTask,
   finishModuleShadowTask,
   startModuleShadowTask,
@@ -2481,6 +2485,21 @@ export const useStore = create<StoreState>((set, get) => ({
     }
     const moduleByKey = new Map(REPORT_MODULES.map((module) => [module.key, module]))
     const activeModuleShadowTaskIds = new Map<ModuleKey, string>()
+    const persistCompletedModuleState = async (module: typeof REPORT_MODULES[number]): Promise<void> => {
+      const persisted = await persistCompletedModuleSnapshot(
+        () => window.api.saveLastProject(buildProjectSnapshot(get()))
+      )
+      if (!persisted.ok && isCurrentSession()) {
+        get()._post(
+          'assistant',
+          completedModulePersistenceWarning(
+            `M${module.id} ${module.title}`,
+            friendlyError(persisted.error)
+          ),
+          'error'
+        )
+      }
+    }
     const runModule = async (module: typeof REPORT_MODULES[number]): Promise<void> => {
       if (!isCurrentSession()) return
       const savedTaskId = `${sessionId}:module:v2:${module.key}`
@@ -2541,7 +2560,7 @@ export const useStore = create<StoreState>((set, get) => ({
             moduleStates: { ...state.moduleStates, [module.key]: outcome.moduleState }
           }
         })
-        await window.api.saveLastProject(buildProjectSnapshot(get()))
+        await persistCompletedModuleState(module)
         return output
       }
       const skippedReason = sufficiency.skipped.get(module.key)
@@ -2775,7 +2794,7 @@ export const useStore = create<StoreState>((set, get) => ({
         }
       })
       updateModuleState(module.key, { status: 'done', updatedAt: completedAt })
-      await window.api.saveLastProject(buildProjectSnapshot(get()))
+      await persistCompletedModuleState(module)
     }
 
     const executionBatches = buildModuleExecutionBatches(REPORT_MODULES)
