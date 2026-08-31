@@ -9,6 +9,7 @@ import type {
   ModuleRunState,
   ReportEngineVersion
 } from '../../../shared/types'
+import type { TaskCurrentIndex } from '../../../shared/taskCurrentIndex'
 import type { TaskRecord } from '../../../shared/taskModel'
 import { SOP_STEPS } from '../../../shared/types'
 
@@ -24,6 +25,7 @@ export interface ProjectSnapshotState {
   artifacts: Record<number, string>
   taskJournal?: Record<string, ProjectTaskSnapshot>
   taskRecords?: Record<string, TaskRecord>
+  currentTaskByLogicalKey?: TaskCurrentIndex
   reportMarkdown: string
   reportStale: boolean
   phase: ProjectPhase
@@ -50,6 +52,7 @@ export function buildProjectSnapshot(state: ProjectSnapshotState): SavedProject 
     artifacts: state.artifacts,
     taskJournal: state.taskJournal || {},
     taskRecords: state.taskRecords || {},
+    currentTaskByLogicalKey: state.currentTaskByLogicalKey || {},
     reportMarkdown: state.phase === 'cleaning' || state.phase === 'analyzing'
       ? state.artifacts[REPORT_STEP_ID] || ''
       : state.reportMarkdown,
