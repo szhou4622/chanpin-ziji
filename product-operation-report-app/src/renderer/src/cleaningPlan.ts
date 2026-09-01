@@ -42,16 +42,45 @@ export interface CleaningPlanSource extends SourceCleanCacheInput {
 const SEMANTIC_HEADER = /评论|评价|反馈|用户声音|完整文案|脚本文案|口播文案|口播字幕|字幕|脚本|标题文案|素材文案|内容原文/iu
 const AGGREGATED_METRIC_HEADER = /(?:率|数|量|金额|订单|人数|次数|占比|比例|得分|评分|星级|等级|均值|平均值|ID|编号)$/iu
 const MAX_SILENT_MODEL_BATCHES = 20
+const WORKSHEET_MARKER = /^###\s*工作表：/u
 
-function firstTableHeaders(text: string): string[] {
-  const first = text.split(/\r?\n/u).find((line) => line.trim() && !/^###\s*工作表/u.test(line)) || ''
-  const delimiter = first.includes('\t') ? '\t' : ','
-  return first.split(delimiter).map((value) => value.replace(/^['"]|['"]$/gu, '').trim())
+function parseTableHeaders(line: string): string[] {
+  const delimiter = line.includes('\t') ? '\t' : ','
+  return line.split(delimiter).map((value) => value.replace(/^['"]|['"]$/gu, '').trim())
+}
+
+/**
+ * Returns the header row for every workbook sheet instead of inspecting only the
+ * first sheet. Parsed workbook text uses `### 工作表：...` markers; plain CSV/TSV
+ * remains a single logical table and therefore contributes one header row.
+ */
+function tableHeaderRows(text: string): string[][] {
+  const lines = text.split(/\r?\n/u)
+  const hasWorksheetMarkers = lines.some((line) => WORKSHEET_MARKER.test(line.trim()))
+  if (!hasWorksheetMarkers) {
+    const first = lines.find((line) => line.trim()) || ''
+    return first ? [parseTableHeaders(first)] : []
+  }
+
+  const rows: string[][] = []
+  let waitingForHeader = false
+  for (const line of lines) {
+    const trimmed = line.trim()
+    if (WORKSHEET_MARKER.test(trimmed)) {
+      waitingForHeader = true
+      continue
+    }
+    if (!trimmed || !waitingForHeader) continue
+    rows.push(parseTableHeaders(trimmed))
+    waitingForHeader = false
+  }
+  return rows
 }
 
 export function tableNeedsSemanticModel(text: string): boolean {
-  const headers = firstTableHeaders(text)
-  return headers.some((header) => SEMANTIC_HEADER.test(header) && !AGGREGATED_METRIC_HEADER.test(header))
+  return tableHeaderRows(text).some((headers) =>
+    headers.some((header) => SEMANTIC_HEADER.test(header) && !AGGREGATED_METRIC_HEADER.test(header))
+  )
 }
 
 function visionCount(source: CleaningPlanSource): number {
