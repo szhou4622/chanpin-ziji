@@ -8,6 +8,7 @@ import {
   parseProxyRequestStates,
   type ProxyRequestState
 } from './proxyRequestLifecycle'
+import { reconcileDetachedProxyTask } from './proxyRequestReconcile'
 
 interface ProxySession {
   token: string
@@ -145,6 +146,20 @@ export async function cancelProxyTask(taskKey: string, preferredRequestId?: stri
   const active = await fetchActiveProxyRequests(safeTaskKey)
   if (!active.length) return []
   return Promise.all(active.map((request) => cancelProxyRequest(request.requestId)))
+}
+
+export async function reconcileProxyTaskBeforeSubmission(taskKey: string, signal: AbortSignal): Promise<void> {
+  const safeTaskKey = assertSafeProxyTaskKey(taskKey)
+  const outcome = await reconcileDetachedProxyTask(safeTaskKey, signal, {
+    listActive: fetchActiveProxyRequests,
+    cancel: cancelProxyRequest
+  })
+  if (outcome.status === 'ready') return
+  if (outcome.status === 'stopped') throw new Error('已停止')
+  if (outcome.status === 'pending') {
+    throw new Error('上一条模型任务仍在服务器结束中，为避免重复扣费，本次没有提交新请求。请稍后重试。')
+  }
+  throw new Error('无法确认上一条模型任务是否已结束，为避免重复扣费，本次没有提交新请求。请检查网络后重试。')
 }
 
 export function clearAiProxySession(): void {

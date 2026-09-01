@@ -83,6 +83,7 @@ import {
   clearAiProxySession,
   clearProxyWalletSnapshot,
   fetchProxyWallet,
+  reconcileProxyTaskBeforeSubmission,
   testProxyHealth
 } from './aiProxy'
 import { ProxyRequestTracker, type TrackedProxyRequest } from './proxyRequestLifecycle'
@@ -723,6 +724,7 @@ ipcMain.on(
             return
           }
           profiles = await authorizeProxyProfiles(profiles)
+          await reconcileProxyTaskBeforeSubmission(context.taskKey, controller.signal)
         } catch (error) {
           event.sender.send(channel, {
             type: 'error',
