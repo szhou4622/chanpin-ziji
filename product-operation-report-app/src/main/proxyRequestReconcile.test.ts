@@ -68,6 +68,21 @@ describe('detached proxy request reconciliation', () => {
     expect(outcome.status).toBe('unavailable')
   })
 
+  it('fails closed when active lookup returns a different logical task', async () => {
+    const cancel = vi.fn()
+    const outcome = await reconcileDetachedProxyTask(
+      'report-a:module:v2:product-info',
+      new AbortController().signal,
+      {
+        listActive: vi.fn().mockResolvedValue([state({ taskKey: 'report-a:module:v2:voc' })]),
+        cancel,
+        wait: instantWait
+      }
+    )
+    expect(outcome.status).toBe('unavailable')
+    expect(cancel).not.toHaveBeenCalled()
+  })
+
   it('never allows a new attempt while the detached request remains running', async () => {
     const detached = state()
     const listActive = vi.fn().mockResolvedValue([detached])
