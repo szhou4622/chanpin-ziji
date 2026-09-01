@@ -26,10 +26,10 @@ jobs:
           cache: npm
           cache-dependency-path: product-operation-report-app/package-lock.json
 
-      - name: Apply guarded evidence identity patch
+      - name: Apply guarded evidence cache version patch
         run: |
           set -euo pipefail
-          python .github/scripts/phase3-evidence-content-hash.py
+          python .github/scripts/phase3-evidence-cache-version.py
           git diff --check
 
       - name: Install dependencies
@@ -46,23 +46,15 @@ jobs:
           npm run test:unit
           npm run build
 
-      - name: Commit verified product changes
+      - name: Commit verified cache protocol change
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add product-operation-report-app/src/shared/types.ts \
-                  product-operation-report-app/src/shared/reportDisplay.ts \
-                  product-operation-report-app/src/shared/reportDisplay.test.ts \
-                  product-operation-report-app/src/main/project.ts \
-                  product-operation-report-app/src/renderer/src/store.ts \
-                  product-operation-report-app/src/renderer/src/sourceCleanBatches.ts \
-                  product-operation-report-app/src/renderer/src/sourceCleanBatches.test.ts \
-                  product-operation-report-app/src/renderer/src/validate.ts \
-                  product-operation-report-app/src/renderer/src/validate.test.ts
+          git add product-operation-report-app/src/main/sourceCleanCache.ts
           if git diff --cached --quiet; then
-            echo 'No generated evidence identity changes to commit.'
+            echo 'No generated cache protocol change to commit.'
             exit 1
           fi
-          git commit -m 'feat: anchor evidence ids to uploaded content hashes'
+          git commit -m 'fix: invalidate legacy evidence caches once'
           git push origin HEAD:phase3/evidence-content-hash
