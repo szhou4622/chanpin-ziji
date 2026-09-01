@@ -28,6 +28,7 @@ import type {
 } from '../shared/types'
 import { reconcileTaskRecordMirror, sanitizeTaskRecords } from '../shared/taskModel'
 import { sanitizeTaskCurrentIndex } from '../shared/taskCurrentIndex'
+import { normalizeSha256 } from '../shared/evidenceIdentity'
 
 type PlainRecord = Record<string, unknown>
 
@@ -343,6 +344,7 @@ function sanitizeSource(value: unknown): ProjectSourceSnapshot | null {
       : undefined,
     note: optionalString(value.note),
     size: optionalNumber(value.size),
+    contentHash: normalizeSha256(value.contentHash),
     topLevelId: optionalString(value.topLevelId),
     derivedKind: ['archive-entry', 'embedded-image', 'rendered-page', 'converted-page'].includes(asString(value.derivedKind))
       ? value.derivedKind as ProjectSourceSnapshot['derivedKind']

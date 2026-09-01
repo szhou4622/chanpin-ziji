@@ -397,6 +397,10 @@ export interface SourceImageAttachment {
 
 export interface SourceCleanCacheInput {
   name: string
+  /** Stable project-local source identity; excluded from technical cache keys. */
+  sourceId?: string
+  /** Full SHA-256 of the exact top-level uploaded bytes; excluded from technical cache keys. */
+  contentHash?: string
   kind: 'image' | 'doc' | 'table' | 'other'
   text?: string
   dataUrl?: string
@@ -491,6 +495,8 @@ export interface ProjectSourceSnapshot {
   purpose?: string
   note?: string
   size?: number
+  /** Full SHA-256 of the exact top-level uploaded bytes. */
+  contentHash?: string
   /** Root upload selected by the user. Derived pages/images/ZIP entries share this id. */
   topLevelId?: string
   derivedKind?: 'archive-entry' | 'embedded-image' | 'rendered-page' | 'converted-page'

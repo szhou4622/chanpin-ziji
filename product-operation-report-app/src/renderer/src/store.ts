@@ -71,6 +71,7 @@ import {
   validateModuleOutput
 } from './modules'
 import { inferSourcePlatform } from './sourceMetadata'
+import { sha256ArrayBuffer } from './contentHash'
 import { buildModuleExecutionBatches } from './moduleDependencyResolver'
 
 export { friendlyError } from './store/errors'
@@ -85,6 +86,7 @@ export interface Source {
   attachments?: SourceImageAttachment[]
   text?: string
   size?: number
+  contentHash?: string
   parsing?: boolean
   error?: string
   warning?: string
@@ -258,6 +260,8 @@ const isRunningPhase = (phase: Phase): boolean => phase === 'cleaning' || phase 
 function toSourceCleanCacheInput(source: Source): SourceCleanCacheInput {
   return {
     name: source.name,
+    sourceId: source.id,
+    contentHash: source.contentHash,
     kind: source.kind,
     text: source.text,
     dataUrl: source.dataUrl,
@@ -683,8 +687,8 @@ export function inspectImageHeader(bytes: Uint8Array): ImageHeaderInfo {
 }
 
 // 截图压缩：缩放到最大边 maxDim、转 JPEG，避免多张全尺寸图拼成超大请求体导致 fetch failed
-const downscaleImage = async (file: File, maxDim = 1600, quality = 0.9): Promise<string> => {
-  const headerBytes = new Uint8Array(await file.arrayBuffer())
+const downscaleImage = async (file: File, maxDim = 1600, quality = 0.9, sourceBytes?: ArrayBuffer): Promise<string> => {
+  const headerBytes = new Uint8Array(sourceBytes || await file.arrayBuffer())
   inspectImageHeader(headerBytes)
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
@@ -1520,6 +1524,7 @@ export const useStore = create<StoreState>((set, get) => ({
         try {
           if (job.ext === 'zip') {
             const buf = await job.file.arrayBuffer()
+            const contentHash = await sha256ArrayBuffer(buf)
             const archiveItems = await window.api.parseArchive(job.name, buf)
             // 50份上限只计算用户选择的顶层文件；ZIP条目属于父文件的派生证据。
             const items = [...archiveItems].sort((left, right) => Number(right.ok) - Number(left.ok))
@@ -1590,6 +1595,7 @@ export const useStore = create<StoreState>((set, get) => ({
                     purpose: inferPurpose(`${job.name}/${it.name}`),
                     kindV1: inferKindV1(`${job.name}/${it.name}`),
                     note: `来自压缩包：${job.name}`,
+                    contentHash,
                     topLevelId: job.id,
                     derivedKind: 'archive-entry' as const
                   }))
@@ -1600,12 +1606,14 @@ export const useStore = create<StoreState>((set, get) => ({
           }
 
           if (job.kind === 'image') {
-            const dataUrl = await downscaleImage(job.file)
+            const buf = await job.file.arrayBuffer()
+            const contentHash = await sha256ArrayBuffer(buf)
+            const dataUrl = await downscaleImage(job.file, 1600, 0.9, buf)
             set((s) =>
               s.analysisSessionId === sessionId
                 ? {
                     sources: s.sources.map((a) =>
-                      a.id === job.id ? { ...a, parsing: false, dataUrl, error: undefined } : a
+                      a.id === job.id ? { ...a, parsing: false, dataUrl, contentHash, error: undefined } : a
                     )
                   }
                 : s
@@ -1614,6 +1622,7 @@ export const useStore = create<StoreState>((set, get) => ({
           }
 
           const buf = await job.file.arrayBuffer()
+          const contentHash = await sha256ArrayBuffer(buf)
           const parsed = await window.api.parseFile(job.file.name, buf)
           const attachments = await Promise.all(
             (parsed.attachments || []).map(async (item) => {
@@ -1662,6 +1671,7 @@ export const useStore = create<StoreState>((set, get) => ({
               platform: job.platform || inferSourcePlatform(job.name, parsed.text || ''),
               purpose: job.purpose,
               kindV1: job.kindV1,
+              contentHash,
               topLevelId: job.id
             }
             return { sources: [...retainedSources, parent] }

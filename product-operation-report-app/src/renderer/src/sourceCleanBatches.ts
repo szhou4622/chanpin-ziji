@@ -1,6 +1,7 @@
 import Papa from 'papaparse'
 import type { SourceCleanCacheInput } from '../../shared/types'
 import { SOURCE_TEXT_LIMIT } from '../../shared/reportVersions'
+import { evidenceScopeFromContentHash } from '../../shared/evidenceIdentity'
 
 // 真实 50k Token 清洗请求在兼容中转上可能超过 90 秒才返回首包。
 // 控制在约 28k 字符，让宽表分成更多但更可靠、单次预留更低的批次。
@@ -61,6 +62,8 @@ interface TablePiece {
 }
 
 export function sourceEvidenceScope(source: SourceCleanCacheInput): string {
+  const contentBacked = evidenceScopeFromContentHash(source.contentHash, source.sourceId)
+  if (contentBacked) return contentBacked
   const content = source.text || source.dataUrl || ''
   const attachmentScope = (source.attachments || []).map((item) => {
     const data = item.dataUrl || ''
@@ -68,9 +71,8 @@ export function sourceEvidenceScope(source: SourceCleanCacheInput): string {
     return [item.name, String(data.length), data.slice(0, 512), data.slice(middle, middle + 512), data.slice(-512)].join('\u0000')
   }).join('\u0001')
   const middle = Math.max(0, Math.floor(content.length / 2) - 1024)
-  // Evidence IDs only need to be compact and stable inside a report. Sampling the beginning,
-  // middle and end prevents same-name/same-prefix exports from sharing a scope without hashing
-  // hundreds of megabytes on the renderer thread.
+  // Legacy compatibility only: projects saved before contentHash existed keep their original
+  // 8-character sampled scope so existing cleaning ledgers and reports do not need migration.
   const text = [
     source.name,
     String(content.length),

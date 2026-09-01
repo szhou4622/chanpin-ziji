@@ -1,5 +1,15 @@
 import { describe, expect, it } from 'vitest'
-import { validateReportStructure } from './validate'
+import { validateReportEvidenceLinks, validateReportStructure } from './validate'
+
+describe('report evidence identity compatibility', () => {
+  it('accepts both legacy and SHA-backed evidence ids from the cleaning ledger', () => {
+    const legacy = 'POR-R-32F24FA0-000001'
+    const current = 'POR-T-ABABABABABABABABABABABAB-1234567890AB-000001'
+    const audit = validateReportEvidenceLinks(`金额 100，来源 ${legacy}；转化 20，来源 ${current}`, `${legacy}\n${current}`)
+    expect(audit.errors).toEqual([])
+    expect(audit.linkedIds).toBe(2)
+  })
+})
 
 describe('six-module report structure', () => {
   it('accepts a continuous M1-M6 report and an optional legacy appendix', () => {
