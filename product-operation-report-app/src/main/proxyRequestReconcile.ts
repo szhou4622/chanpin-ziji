@@ -34,7 +34,10 @@ async function waitWithSignal(ms: number, signal: AbortSignal): Promise<boolean>
 }
 
 function runningForTask(states: ProxyRequestState[], taskKey: string): ProxyRequestState[] {
-  return states.filter((request) => request.taskKey === taskKey && request.status === 'running')
+  if (states.some((request) => request.taskKey !== taskKey)) {
+    throw new Error('业务服务器返回了与当前任务不一致的请求状态。')
+  }
+  return states.filter((request) => request.status === 'running')
 }
 
 /**
