@@ -1,5 +1,7 @@
 const SHA256_HEX = /^[A-F0-9]{64}$/u
 
+/** Bump only when persisted cleaning evidence identity semantics change. */
+export const EVIDENCE_ID_VERSION = 'evidence-id-v2-sha256-source'
 export const LEGACY_EVIDENCE_SCOPE_PATTERN = '[A-F0-9]{8}'
 export const CONTENT_EVIDENCE_SCOPE_PATTERN = '[A-F0-9]{24}(?:-[A-Z0-9]{1,12})?'
 export const EVIDENCE_SCOPE_PATTERN = `(?:${LEGACY_EVIDENCE_SCOPE_PATTERN}|${CONTENT_EVIDENCE_SCOPE_PATTERN})`
