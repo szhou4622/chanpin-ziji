@@ -19,7 +19,7 @@ function state(overrides: Partial<ProxyRequestState> = {}): ProxyRequestState {
   }
 }
 
-const instantWait = async (_ms: number, signal: AbortSignal): Promise<boolean> => !signal.aborted
+const instantWait = (_ms: number, signal: AbortSignal): Promise<boolean> => Promise.resolve(!signal.aborted)
 
 describe('detached proxy request reconciliation', () => {
   it('allows submission immediately when the server has no active request', async () => {
