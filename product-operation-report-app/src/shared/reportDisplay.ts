@@ -1,9 +1,8 @@
+import { EVIDENCE_VALUE_PATTERN } from './evidenceIdentity'
+
 const EVIDENCE_ID_ATOM = [
   '`{0,2}',
-  '(?:',
-  'POR-[RTI]-[A-F0-9]{8}-\\d{6}',
-  '|POR-B-[A-F0-9]{8}-\\d{4}\\|ROWS:\\d+-\\d+\\|COUNT:\\d+',
-  ')',
+  `(?:${EVIDENCE_VALUE_PATTERN})`,
   '`{0,2}'
 ].join('')
 
@@ -12,7 +11,7 @@ const EVIDENCE_ID_SEQUENCE = new RegExp(
   'giu'
 )
 
-const EVIDENCE_ID_VALUE = /POR-[RTI]-[A-F0-9]{8}-\d{6}|POR-B-[A-F0-9]{8}-\d{4}\|ROWS:\d+-\d+\|COUNT:\d+/giu
+const EVIDENCE_ID_VALUE = new RegExp(EVIDENCE_VALUE_PATTERN, 'giu')
 
 export type EvidenceSourceNameMap = Readonly<Record<string, string>>
 

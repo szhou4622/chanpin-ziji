@@ -14,8 +14,10 @@ describe('reportMarkdownForDisplay', () => {
     expect(visible).toContain('酸菜炒肉')
   })
 
-  it('also hides internal batch receipts if they leak into a report', () => {
+  it('also hides legacy and content-backed batch receipts if they leak into a report', () => {
     expect(reportMarkdownForDisplay('依据 POR-B-ABCDEF12-0001|ROWS:1-50|COUNT:50'))
+      .toBe('依据 已核验资料')
+    expect(reportMarkdownForDisplay('依据 POR-B-ABABABABABABABABABABABAB-1234567890AB-0001|ROWS:1-50|COUNT:50'))
       .toBe('依据 已核验资料')
   })
 
@@ -26,5 +28,12 @@ describe('reportMarkdownForDisplay', () => {
     }])
     expect(reportMarkdownForDisplay('来源：POR-R-32F24FA0-000001', map))
       .toBe('来源：经营数据表.xlsx')
+
+    const contentMap = buildEvidenceSourceNameMap([{
+      name: '新版经营数据表.xlsx',
+      text: '__证据ID,成交金额\nPOR-R-ABABABABABABABABABABABAB-1234567890AB-000001,211985.04'
+    }])
+    expect(reportMarkdownForDisplay('来源：POR-R-ABABABABABABABABABABABAB-1234567890AB-000001', contentMap))
+      .toBe('来源：新版经营数据表.xlsx')
   })
 })

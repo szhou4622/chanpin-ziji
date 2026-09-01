@@ -3,7 +3,8 @@ import Papa from 'papaparse'
 import {
   buildSourceCleanBatchPlan,
   combineSourceCleanBatchOutputs,
-  sourceCleanBatchInternals
+  sourceCleanBatchInternals,
+  sourceEvidenceScope
 } from './sourceCleanBatches'
 
 describe('row-anchored source cleaning coverage', () => {
@@ -12,6 +13,14 @@ describe('row-anchored source cleaning coverage', () => {
     kind: 'table' as const,
     text: '原视频,3秒开头\na.mp4,开头A\nb.mp4,开头B'
   }
+
+  it('uses SHA-backed scopes for new sources while preserving the legacy fallback', () => {
+    const hash = 'ab'.repeat(32)
+    const scope = sourceEvidenceScope({ ...source, sourceId: '12345678-90ab-4def-8123-456789abcdef', contentHash: hash })
+    expect(scope).toBe('ABABABABABABABABABABABAB-1234567890AB')
+    expect(sourceEvidenceScope({ ...source, sourceId: 'fedcba98-7654-4321-8123-456789abcdef', contentHash: hash })).not.toBe(scope)
+    expect(sourceEvidenceScope(source)).toMatch(/^[A-F0-9]{8}$/u)
+  })
 
   it('accepts a CSV result with exactly one populated row per evidence ID', () => {
     const plan = buildSourceCleanBatchPlan(source)

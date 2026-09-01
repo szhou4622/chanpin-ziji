@@ -5,6 +5,7 @@ import {
   PROCESS_TERMS,
   type FinalReportPart
 } from './reportTemplate'
+import { EVIDENCE_ID_PATTERN } from '../../shared/evidenceIdentity'
 
 // 成稿前的来源绑定硬规则检查（启发式，非阻断，仅提示）
 export function validateReport(md: string): string[] {
@@ -180,14 +181,15 @@ export function validateReportEvidenceLinks(
   md: string,
   cleanedData: string
 ): { errors: string[]; linkedIds: number; unlinkedNumericLines: number } {
-  const idPattern = /\bPOR-[RTI]-[A-F0-9]{8}-\d{6}\b/gu
+  const idPattern = new RegExp(`\\b${EVIDENCE_ID_PATTERN}\\b`, 'gu')
+  const idLinePattern = new RegExp(`\\b${EVIDENCE_ID_PATTERN}\\b`, 'u')
   const reportIds = [...new Set(md.match(idPattern) || [])]
   const knownIds = new Set(cleanedData.match(idPattern) || [])
   const unknown = reportIds.filter((id) => !knownIds.has(id))
   const unlinkedNumericLines = md.split(/\r?\n/u).filter((line) => {
     const trimmed = line.trim()
     if (!trimmed || /^#{1,6}\s|^生成日期|^\|?\s*[-:]+/u.test(trimmed)) return false
-    if (!/\d/u.test(trimmed) || /\bPOR-[RTI]-[A-F0-9]{8}-\d{6}\b/u.test(trimmed)) return false
+    if (!/\d/u.test(trimmed) || idLinePattern.test(trimmed)) return false
     return !/建议|排序|优先级|第\s*\d+|近期|中期|长期|验证项/u.test(trimmed)
   }).length
   return {
