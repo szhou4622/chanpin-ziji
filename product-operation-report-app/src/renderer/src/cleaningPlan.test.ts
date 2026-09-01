@@ -32,6 +32,37 @@ describe('cleaning planner', () => {
     expect(batches.every((batch) => Boolean(batch.context.coverageReceipt))).toBe(true)
   })
 
+  it('routes a workbook to semantic cleaning when a later worksheet contains raw reviews', () => {
+    const text = [
+      '### 工作表：经营汇总',
+      '商品名称,成交金额,成交订单数,评价好评率',
+      '产品A,1000,20,98%',
+      '',
+      '### 工作表：用户评价',
+      '评价内容,评分',
+      '很好用，老人也能看懂,5',
+      '包装有点难拆,3'
+    ].join('\n')
+    const plan = buildCleaningPlan([{ id: 'mixed-workbook', name: '经营与评价.xlsx', kind: 'table', text }])
+    expect(plan.entries[0].method).toBe('model_semantic')
+    expect(plan.expectedModelJobs).toBeGreaterThan(0)
+  })
+
+  it('keeps a multi-sheet workbook local when every worksheet is aggregate metrics only', () => {
+    const text = [
+      '### 工作表：商品经营',
+      '商品名称,成交金额,成交订单数',
+      '产品A,1000,20',
+      '',
+      '### 工作表：人群汇总',
+      '年龄段,人数,占比',
+      '31-40,100,40%'
+    ].join('\n')
+    const plan = buildCleaningPlan([{ id: 'metrics-workbook', name: '经营汇总.xlsx', kind: 'table', text }])
+    expect(plan.entries[0].method).toBe('local_exact')
+    expect(plan.expectedModelJobs).toBe(0)
+  })
+
   it('plans fifty standard business tables with zero model cleaning', () => {
     const text = '商品名称,成交金额,成交订单数\n产品A,100,2\n产品B,200,3'
     const sources = Array.from({ length: 50 }, (_, index) => ({
