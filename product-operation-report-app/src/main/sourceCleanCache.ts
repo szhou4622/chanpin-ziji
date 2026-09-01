@@ -9,6 +9,7 @@ import type {
   SourceCleanCacheStoreResult
 } from '../shared/types'
 import { SOURCE_CLEAN_PROMPT_VERSION, TABLE_DIGEST_VERSION } from '../shared/reportVersions'
+import { EVIDENCE_ID_VERSION } from '../shared/evidenceIdentity'
 
 const LEGACY_CACHE_FILE_NAME = 'source-clean-cache.json'
 const CACHE_DIRECTORY_NAME = 'source-clean-cache-v2'
@@ -220,7 +221,7 @@ export function sourceCleanCacheKey(input: SourceCleanCacheInput, model: string)
   const clean = validateInput(input)
   const hash = createHash('sha256')
   for (const value of [
-    SOURCE_CLEAN_PROMPT_VERSION, TABLE_DIGEST_VERSION, safeString(model, 200).trim().toLowerCase(),
+    EVIDENCE_ID_VERSION, SOURCE_CLEAN_PROMPT_VERSION, TABLE_DIGEST_VERSION, safeString(model, 200).trim().toLowerCase(),
     clean.name, clean.kind, clean.attribution || '', clean.platform || '', clean.purpose || '', clean.kindV1 || '', typeof input.note === 'string' ? input.note : '',
     clean.text || '', clean.dataUrl || ''
   ]) updateHash(hash, value)
