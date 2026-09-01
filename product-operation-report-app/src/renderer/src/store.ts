@@ -1027,7 +1027,7 @@ export const useStore = create<StoreState>((set, get) => ({
         id: crypto.randomUUID(),
         role: 'assistant',
         kind: 'narration',
-        text: '上次任务在执行过程中退出了，已恢复保存好的资料和完整结果。请检查后重新开始。'
+        text: '上次任务在执行过程中退出了，已恢复保存好的资料和完整结果。已完成模块不会重跑；请检查资料后点“确认，继续分析”，软件只会续跑未完成模块。'
       })
     }
     if (lastProject?.missingBlobs?.length) {
@@ -1301,7 +1301,7 @@ export const useStore = create<StoreState>((set, get) => ({
         id: crypto.randomUUID(),
         role: 'assistant',
         kind: 'narration',
-        text: '上一份分析在执行过程中退出了，已恢复已保存的内容。请检查资料后重新开始。'
+        text: '上一份分析在执行过程中退出了，已恢复已保存的内容。已完成模块不会重跑；请检查资料后继续分析，软件只会续跑未完成模块。'
       })
     }
     if (previous.missingBlobs?.length) {

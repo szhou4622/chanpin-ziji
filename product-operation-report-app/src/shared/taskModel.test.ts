@@ -153,9 +153,11 @@ describe('task domain model', () => {
     expect(reconciled[failed.id]).toMatchObject({ executionStatus: 'FAILED', errorClass: 'NETWORK' })
     expect(reconciled[running.id]).toMatchObject({
       executionStatus: 'PAUSED',
+      errorClass: 'PROCESS_INTERRUPTED',
       startedAt: running.startedAt,
       migratedFromLegacy: false
     })
+    expect(reconciled[failed.id]).toMatchObject({ executionStatus: 'FAILED', errorClass: 'NETWORK' })
   })
 
   it('rejects canonical-only SUCCEEDED metadata without a matching payload carrier', () => {

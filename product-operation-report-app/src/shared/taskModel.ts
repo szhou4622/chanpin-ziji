@@ -316,8 +316,8 @@ function completedTaskHasVerifiedPayload(
  *   same id + updatedAt mutation.
  * - A canonical-only task may survive persistence while it has not succeeded yet;
  *   scheduler states do not have a legacy journal representation.
- * - A persisted RUNNING task is recovered as PAUSED because the process that owned
- *   the execution no longer exists after application restart.
+ * - A persisted RUNNING task is recovered as PAUSED with PROCESS_INTERRUPTED because
+ *   the process that owned the execution no longer exists after application restart.
  * - A completed immutable Task instance may survive only when payloadKey points to
  *   a complete legacy payload with the same kind, input fingerprint and updatedAt.
  *   This keeps the compatibility bridge fail-closed: metadata alone cannot prove a
@@ -346,6 +346,7 @@ export function reconcileTaskRecordMirror(
           executionStatus: 'PAUSED',
           resultStatus: undefined,
           retryAt: undefined,
+          errorClass: 'PROCESS_INTERRUPTED',
           endedAt: undefined
         }
       : canonical
