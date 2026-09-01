@@ -2,6 +2,16 @@ export function friendlyError(value: unknown): string {
   const raw = (value instanceof Error ? value.message : String(value || '')).replace(/\s+/g, ' ').trim()
   if (!raw) return '操作没有完成，请重试。'
   if (/已停止|aborted|aborterror/i.test(raw)) return '已停止。'
+  if (/HTTP\s*409|same batch still processing|同一模型任务正在处理中|上一条模型任务.*(?:处理中|结束中)/iu.test(raw)) {
+    return '上一条模型任务仍在服务器处理中，请稍后重试。'
+  }
+  if (/无法确认上一条模型任务是否已结束|避免重复扣费.*检查网络/iu.test(raw)) {
+    return '网络连接失败，暂时无法确认上一条模型任务是否已结束；为避免重复扣费，本次没有提交新请求。'
+  }
+  if (/HTTP\s*5\d\d|服务请求失败.*5\d\d/iu.test(raw)) {
+    const status = raw.match(/HTTP\s*(5\d\d)/i)?.[1]
+    return status ? `模型服务暂时不可用（HTTP ${status}），请稍后重试。` : '模型服务暂时不可用，请稍后重试。'
+  }
   if (/enospc|no space left|磁盘空间不足|磁盘已满/i.test(raw)) {
     return '磁盘空间不足，无法保存文件。请清理空间或改存到其他磁盘后重试。'
   }

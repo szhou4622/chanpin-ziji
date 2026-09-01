@@ -85,7 +85,25 @@ export class ProxyRequestTracker {
     const root = assertSafeProxyRequestId(rootRequestId)
     const safeTaskKey = assertSafeProxyTaskKey(taskKey)
     if (this.entries.has(root)) throw new Error('检测到重复的代理请求跟踪记录。')
+    if (this.findByTaskKey(safeTaskKey)) throw new Error('同一模型任务正在处理中，请稍后重试。')
     this.entries.set(root, { rootRequestId: root, ownerId, taskKey: safeTaskKey })
+  }
+
+  findByTaskKey(taskKey: string, excludeRootRequestId?: string): TrackedProxyRequest | undefined {
+    const safeTaskKey = assertSafeProxyTaskKey(taskKey)
+    let exclude = ''
+    if (excludeRootRequestId) {
+      try {
+        exclude = assertSafeProxyRequestId(excludeRootRequestId)
+      } catch {
+        exclude = ''
+      }
+    }
+    for (const [root, entry] of this.entries) {
+      if (root === exclude || entry.taskKey !== safeTaskKey) continue
+      return { ...entry }
+    }
+    return undefined
   }
 
   setCurrent(rootRequestId: string, ownerId: number, requestId: string): boolean {

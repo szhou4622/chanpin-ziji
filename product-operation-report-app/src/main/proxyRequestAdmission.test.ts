@@ -11,6 +11,7 @@ describe('proxy logical-task admission', () => {
 
     expect(tracker.findByTaskKey(taskKey)?.rootRequestId).toBe(first)
     expect(tracker.findByTaskKey(taskKey, first)).toBeUndefined()
+    expect(() => tracker.claim(second, 20, taskKey)).toThrow(/同一模型任务正在处理中/u)
 
     tracker.claim(second, 20, 'report-a:module:v2:voc')
     expect(tracker.findByTaskKey('report-a:module:v2:voc')?.ownerId).toBe(20)
