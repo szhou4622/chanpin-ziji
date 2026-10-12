@@ -1,0 +1,49 @@
+{
+  "date": "2026-10-12",
+  "service": "product-report-proxy.service",
+  "scope": "production ProductOperationReport only; existing staging services unchanged",
+  "model": "doubao-seed-2-1-pro-260915",
+  "provider_base_url": "https://ark.cn-beijing.volces.com/api/v3",
+  "keyring_generation": "3",
+  "precise_billing_enabled": true,
+  "tariff_version": "ARK-STANDARD-2026-10-12",
+  "backup_directory": "/etc/product-operation-report/backups/ark-v2-20261012T083651Z-c023c18a",
+  "rollback_command": "python3 /etc/product-operation-report/backups/ark-v2-20261012T083651Z-c023c18a/restore.py",
+  "validation": {
+    "local_and_server_v2_http_tests": "5 tests passed, including all 13 task types and legacy model aliases",
+    "client_typecheck": "passed",
+    "client_lint": "passed",
+    "client_unit_tests": "18 files, 90 tests passed",
+    "client_regression": "passed",
+    "client_build": "passed",
+    "real_public_proxy_text": {
+      "requested_model": "gpt-5.5",
+      "actual_model": "doubao-seed-2-1-pro-260915",
+      "cost_cny": "0.00909",
+      "charged_points": 2,
+      "proxy_and_central_ledger_entries_each": 1
+    },
+    "real_public_proxy_vision": {
+      "input": "synthetic 64x64 red image held in memory",
+      "known_color_identified": true,
+      "cost_cny": "0.008322",
+      "charged_points": 2,
+      "proxy_and_central_ledger_entries_each": 1
+    },
+    "real_public_proxy_search": {
+      "actual_model": "doubao-seed-2-1-pro-260915",
+      "citations_verified": true,
+      "cost_cny": "0.033186",
+      "charged_points": 7,
+      "proxy_and_central_ledger_entries_each": 1
+    },
+    "repeat_confirmation": "all successful real cases charged once",
+    "test_authorizations": "exact run-owned test codes disabled and wallets frozen; audit records retained"
+  },
+  "notes": [
+    "Upgrade waited until existing model tasks completed before restarting the production service.",
+    "The user's Ark account initially returned ToolNotOpen. The user activated web search; a subsequent real proxy search and V2 settlement passed.",
+    "Existing installed client model names are compatibility aliases only; all new upstream requests use the Doubao model.",
+    "No installer or update manifest was published by this deployment."
+  ]
+}
