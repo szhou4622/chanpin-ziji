@@ -32,6 +32,9 @@ npm run dist:win   # 打包 Windows nsis
 所有任务（包括 M4 对标搜索）使用同一个豆包模型，没有旧模型自动备用。服务器配置及协调升级步骤见
 [代理迁移说明](../server-updates/points-proxy-v1/README.md#豆包-21-迁移)。本分支不包含真实 Key，不会自动部署服务器或发布安装包。
 
+`test:managed-model` 是会产生真实供应商调用的开发直连测试，必须先配置私有文件；无配置时会提前失败，不会拿占位会话请求正式代理。
+M4 联网对标需要正式代理的 Responses 搜索转换；开发直连模式仅支持普通 Chat 请求，不能用它验收 M4 搜索。
+
 ## GitHub 自动打包
 
 推送 `v*` 标签后，GitHub Actions 会分别生成：

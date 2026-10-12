@@ -27,6 +27,9 @@
 所有新请求统一使用 `doubao-seed-2-1-pro-260915`，Base URL 为
 `https://ark.cn-beijing.volces.com/api/v3`。客户端仍连接自己的业务代理，使用短期设备会话；方舟 Key 只在服务器配置。
 
+部署限制：本目录代理仍采用 legacy 即时结算，不包含 `/billing/result/confirm`、`/billing/result/reject` 或 `x-por-precise-billing`。
+客户端会兼容此模式，正常请求可完成；但它不能兑现“保存确认后扣费、失败零扣费”。如果需要该计费契约，部署前必须接入完整 V2 服务并验证，不能直接用本包替换后宣称已满足。当前没有服务器 Key 的测试均为离线/本地模拟，不等同于真实方舟或线上 V2 验收。
+
 1. 在方舟控制台开通该模型；M4 对标研究还需要开通基础联网搜索。
 2. 备份服务器配置和代理代码，然后部署本目录新版代码。安装脚本会安装 `provider_config.py` 到代理目录和密钥轮换工具旁；升级时不能漏掉它。
 3. 检查现有 `/etc/product-operation-report/proxy.env`，将 `POR_PROVIDER_BASE_URL` 改为方舟地址，清空旧 `POR_PROVIDER_API_KEY`。安装脚本不会覆盖已有配置。真实 Key 用下方隐藏输入命令写入 `/etc/product-operation-report/provider-keys.json`。
@@ -34,12 +37,13 @@
 5. 代理代码/环境变量升级后需要重启 `product-report-proxy`；只轮换 Key 时无需重启。检查 `/health` 的 `models` 只有该豆包模型，且 `provider_keyring.models` 中对应线路已配置。
 6. 配套发布本分支客户端后，再验证资料清洗、各模块、M4 搜索引用和结果确认后的积分结算。旧客户端请求旧模型会被新代理拒绝，因此升级窗口需要协调。仓库测试是离线验证，不能代替配置 Key 后的真实调用。
 
-普通任务使用 `/chat/completions`，输出上限使用 `max_tokens`；清洗/摘要关闭深度思考。
+普通任务使用 `/chat/completions`，使用 `max_completion_tokens` 同时限制回答和思维链；清洗/摘要关闭深度思考。
 M4 使用 `/responses`，启用深度思考和 `web_search`，最多一轮、每轮两个关键词；不发送原中转专用的搜索参数或 `prompt_cache_key`。
+Responses 思考强度通过 `reasoning.effort` 设置。Chat 缺少 stop/DONE、Responses 缺少 completed，或明确达到长度上限时，代理不会合成成功完成信号。
 
 价格按[官方标准在线推理](https://docs.volcengine.com/docs/ark/model-pricing?lang=en&redirect=1)：输入 6 元/百万 token、输出 30 元/百万 token、命中缓存输入 1.2 元/百万 token。
 豆包成本直接用人民币计算，不受 `POR_USD_CNY_RATE` 影响；保留历史模型价格仅用于历史记录结算，不开放旧模型请求。没有创建显式持久缓存，因而不计算按小时存储费。
-联网资源默认按 4 元/千次计价，优先读取方舟返回的 `usage.tool_usage.web_search`，去重后的搜索调用事件作为兜底。服务器原有 `POR_WEB_SEARCH_USD_PER_CALL` 可覆盖默认值；免费额度或折扣应按账号实际成本调整。原积分倍率、失败零扣费、确认后结算和幂等规则保持不变。
+联网资源默认按 4 元/千次计价，优先读取方舟返回的 `usage.tool_usage.web_search`，去重后的搜索调用事件作为兜底。服务器原有 `POR_WEB_SEARCH_USD_PER_CALL` 可覆盖默认值；免费额度或折扣应按账号实际成本调整。原积分倍率和幂等规则保持不变；本包仍即时结算，有已产生正文的失败请求仍可能收费，详见上方部署限制。
 
 接口参考：[鉴权与地址](https://docs.volcengine.com/docs/ark/base-url-and-authentication?lang=en)、[Responses](https://docs.volcengine.com/docs/ark/create-model-responses-api?lang=en)、[联网搜索](https://docs.volcengine.com/docs/ark/web-search?lang=en)。
 

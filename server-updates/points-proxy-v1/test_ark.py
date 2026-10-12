@@ -88,7 +88,6 @@ class ArkContractTests(unittest.TestCase):
                 body, endpoint = captured[0]
                 self.assertEqual(body["model"], MANAGED_MODEL)
                 self.assertNotIn("prompt_cache_key", body)
-                self.assertNotIn("max_completion_tokens", body)
                 self.assertEqual(endpoint, "responses" if task == "module_benchmark" else "chat/completions")
                 self.assertEqual(settle.call_args.args[2], "success")
                 self.assertEqual(settle.call_args.args[4]["input_tokens"], 120)
@@ -97,7 +96,8 @@ class ArkContractTests(unittest.TestCase):
                     self.assertIn(b'"status":"verified"', handler.wfile.getvalue())
                 else:
                     self.assertNotIn("tools", body)
-                    self.assertIn("max_tokens", body)
+                    self.assertIn("max_completion_tokens", body)
+                    self.assertNotIn("max_tokens", body)
                 self.assertIn(b"[DONE]", handler.wfile.getvalue())
 
     def test_rotation_migrates_old_routes_and_retains_profiles_for_rollback(self):

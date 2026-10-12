@@ -19,6 +19,7 @@ try {
   const electron = require('electron')
   const result = spawnSync(electron, [output], {
     cwd: projectDir,
+    env: { ...process.env, PRODUCT_REPORT_ALLOW_DEV_OVERRIDES: '1', PRODUCT_REPORT_DEV_FORCE_PROXY: '0' },
     stdio: 'inherit',
     windowsHide: true
   })

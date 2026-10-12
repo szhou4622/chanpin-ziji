@@ -168,7 +168,7 @@ class ProxyLedgerTests(unittest.TestCase):
                 {"role": "system", "content": "Only use reliable sources"},
                 {"role": "user", "content": "Search benchmark brands"},
             ],
-            "max_tokens": 7000,
+            "max_completion_tokens": 7000,
         })
         self.assertEqual(body["model"], proxy.MANAGED_MODEL)
         self.assertEqual(body["instructions"], "Only use reliable sources")
@@ -178,7 +178,8 @@ class ProxyLedgerTests(unittest.TestCase):
         self.assertNotIn("include", body)
         self.assertEqual(body["tools"], [{"type": "web_search", "max_keyword": 2, "limit": 10}])
         self.assertEqual(body["thinking"], {"type": "enabled"})
-        self.assertEqual(body["reasoning_effort"], "high")
+        self.assertEqual(body["reasoning"], {"effort": "high"})
+        self.assertNotIn("reasoning_effort", body)
         self.assertEqual(body["max_tool_calls"], 1)
         self.assertFalse(body["store"])
 
@@ -280,7 +281,8 @@ class ProxyLedgerTests(unittest.TestCase):
         self.assertTrue(any(kind == "heartbeat" for kind, _value in items))
         self.assertTrue(any(kind == "line" for kind, _value in items))
         self.assertTrue(proxy.provider_stream_completed(False, "stop", None, True))
-        self.assertTrue(proxy.provider_stream_completed(False, "", {"input_tokens": 1}, True))
+        self.assertFalse(proxy.provider_stream_completed(False, "", {"input_tokens": 1}, True))
+        self.assertFalse(proxy.provider_stream_completed(True, "length", {"input_tokens": 1}, True))
         self.assertFalse(proxy.provider_stream_completed(False, "", None, True))
 
     def test_heartbeat_starts_before_provider_returns_response_headers(self) -> None:

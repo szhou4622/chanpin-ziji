@@ -946,9 +946,9 @@ def responses_request_body(chat_body: dict[str, Any]) -> dict[str, Any]:
         "instructions": "\n\n".join(instructions),
         "input": input_items,
         "stream": True,
-        "max_output_tokens": chat_body.get("max_tokens", 5000),
+        "max_output_tokens": chat_body.get("max_completion_tokens", 5000),
         "thinking": {"type": "enabled"},
-        "reasoning_effort": "high",
+        "reasoning": {"effort": "high"},
         "store": False,
         "tools": [{
             "type": "web_search",
@@ -1535,15 +1535,16 @@ def provider_request_items(
 
 def provider_stream_completed(saw_done: bool, finish_reason: str, usage: dict[str, Any] | None,
                               sent_content: bool) -> bool:
-    return bool(sent_content and (saw_done or finish_reason == "stop" or usage))
+    # Usage is metering data, not proof that generation finished successfully.
+    return bool(sent_content and finish_reason in ("", "stop") and (saw_done or finish_reason == "stop"))
 
 
 def apply_server_task_options(upstream_body: dict[str, Any], task_type: str) -> None:
     # Only forward Ark-supported options. Client cache hints remain local.
     upstream_body.pop("prompt_cache_key", None)
     upstream_body.pop("reasoning_effort", None)
-    if "max_completion_tokens" in upstream_body:
-        upstream_body["max_tokens"] = upstream_body.pop("max_completion_tokens")
+    # Ark max_completion_tokens caps answer AND thinking tokens. max_tokens
+    # caps only the answer and therefore cannot enforce the reserved budget.
     upstream_body["thinking"] = {"type": "disabled" if task_type in ("source_clean", "summary") else "enabled"}
     if task_type == "module_benchmark":
         upstream_body["tools"] = [{"type": "web_search", "max_keyword": 2, "limit": 10}]
@@ -1734,7 +1735,7 @@ class Handler(BaseHTTPRequestHandler):
             "messages": body["messages"],
             "stream": True,
             "stream_options": {"include_usage": True},
-            "max_tokens": output_limit,
+            "max_completion_tokens": output_limit,
         }
         if temperature is not None:
             upstream_body["temperature"] = float(temperature)
@@ -1919,7 +1920,8 @@ class Handler(BaseHTTPRequestHandler):
                         self.wfile.flush()
                     except (BrokenPipeError, ConnectionResetError, OSError):
                         client_open = False
-            completed = finish_reason != "error" and provider_stream_completed(saw_done, finish_reason, usage, sent_content)
+            completed = (bool(sent_content and finish_reason == "stop") if uses_responses_api
+                         else provider_stream_completed(saw_done, finish_reason, usage, sent_content))
             send_search_metadata()
             if completed and not saw_done and client_open:
                 try:
