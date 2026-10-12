@@ -67,16 +67,16 @@ def run_case(case, output_dir, license_server):
                 if choice.get('finish_reason'):
                     finish = choice['finish_reason']
         output = ''.join(parts)
-        if status != 200 or not done or finish != 'stop' or not output or models != {MODEL}:
-            raise RuntimeError('cleaning stream was incomplete')
-        allowed = set(case['evidenceIds'])
-        cited = set(re.findall(r'POR-R-[A-F0-9]{8}-\d{6}', output))
-        if ('COVERAGE:' + case['coverageReceipt']) not in output or not cited or not cited <= allowed:
-            raise RuntimeError('semantic evidence receipt or references failed')
         output_file = output_dir / (case['id'] + '.json')
         with output_file.open('x', encoding='utf-8') as handle:
             os.chmod(output_file, 0o600)
-            json.dump({'id': case['id'], 'text': output}, handle, ensure_ascii=False)
+            json.dump({'id': case['id'], 'text': output, 'finish_reason': finish}, handle, ensure_ascii=False)
+        if status != 200 or not done or finish != 'stop' or not output or models != {MODEL}:
+            raise RuntimeError('cleaning stream was incomplete')
+        allowed = set(case['evidenceIds'])
+        cited = set(re.findall(r'POR-R-[A-Z0-9-]*', output, re.I))
+        if ('COVERAGE:' + case['coverageReceipt']) not in output or not cited or not cited <= allowed:
+            raise RuntimeError('semantic evidence receipt or references failed')
         receipt = {'request_id': request_id, 'logical_task_id': logical,
             'output_sha256': hashlib.sha256(output.encode()).hexdigest(),
             'receipt_id': 'clean-smoke-receipt:' + request_id, 'locally_valid': True}
@@ -97,6 +97,10 @@ def run_case(case, output_dir, license_server):
             'input_tokens': usage.get('input_tokens'), 'output_tokens': usage.get('output_tokens'),
             'output_chars': len(output), 'cost_cny': row[3], 'test_points': row[4] / 1_000_000,
             'ledger_entries': count, 'replay_charged_once': True}
+    except Exception as error:
+        print(json.dumps({'id': case['id'], 'failure': str(error) if isinstance(error, RuntimeError)
+                          else type(error).__name__}), flush=True)
+        raise
     finally:
         if code_id:
             freeze(code_id, marker)

@@ -2465,13 +2465,22 @@ export const useStore = create<StoreState>((set, get) => ({
                   await rejectIncompleteResult(batchTaskId, res)
                   get()._post(
                     'assistant',
-                    `「${s.name}」第 ${batch.context.batchIndex} 批漏了 ${missingEvidence.length} 个证据单元，正在只补做这一批……`,
+                    `「${s.name}」第 ${batch.context.batchIndex} 批的引用未能完整对应原资料，正在只补做这一批……`,
                     'narration'
                   )
                   const repair = await runWithReservationBackpressure(
                     `「${s.name}」第 ${batch.context.batchIndex} 批补做`,
                     () => runModelRetry(
-                      buildExtractMessages(batch.source, batch.context),
+                      [
+                        ...buildExtractMessages(batch.source, batch.context),
+                        {
+                          role: 'user',
+                          content: '上次结果的证据引用或完整性回执未通过校验，请重新输出本批完整结果。' +
+                            '每个引用必须单独完整照抄原证据ID，保留全部前导0；禁止缩写前缀、简写编号、编造ID或用范围替代。' +
+                            (batch.context.evidenceIds[0] ? `本批合法ID格式示例：${batch.context.evidenceIds[0]}。` : '') +
+                            (batch.context.coverageReceipt ? `最后一行必须原样输出：COVERAGE:${batch.context.coverageReceipt}` : '')
+                        }
+                      ],
                       () => {},
                       aborts.createSetter(),
                       undefined,
@@ -2491,7 +2500,7 @@ export const useStore = create<StoreState>((set, get) => ({
                   )
                   if (!repair.ok || missingSourceCleanEvidenceIds(batch.context, repair.text, batch.context.mode).length) {
                     if (repair.ok) await rejectIncompleteResult(batchTaskId, repair)
-                    markSourceFailure(`第 ${batch.context.batchIndex}/${batch.context.batchCount} 批仍有证据未覆盖，已停止该文件，避免漏资料。`)
+                    markSourceFailure(`第 ${batch.context.batchIndex}/${batch.context.batchCount} 批的引用仍未通过核验，已停止该文件，避免使用无法对应原资料的结果。`)
                     continue
                   }
                   verifiedText = repair.text

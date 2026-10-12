@@ -3,6 +3,7 @@ import Papa from 'papaparse'
 import {
   buildSourceCleanBatchPlan,
   combineSourceCleanBatchOutputs,
+  missingSourceCleanEvidenceIds,
   sourceCleanBatchInternals
 } from './sourceCleanBatches'
 
@@ -51,6 +52,55 @@ describe('row-anchored source cleaning coverage', () => {
     const combined = combineSourceCleanBatchOutputs(plan, outputs)
     expect(combined).toContain('全部有效记录均已送入模型读取')
     expect(combined).not.toContain(plan.batches[0].context.evidenceIds[1])
+  })
+
+  describe('semantic citation validation', () => {
+    const plan = buildSourceCleanBatchPlan(source, { semanticSummary: true })
+    const context = plan.batches[0].context
+    const validId = context.evidenceIds[0]
+    const prefix = validId.slice(0, -6)
+    const output = (citations: string): string => [
+      '分类：竞品数据',
+      `- 本批主要主题，来源：${citations}`,
+      `COVERAGE:${context.coverageReceipt}`
+    ].join('\n')
+
+    it('requires at least one row citation even when the coverage receipt is correct', () => {
+      const text = output('本批所有记录')
+      expect(missingSourceCleanEvidenceIds(context, text, 'semantic_rows')).toEqual([context.coverageReceipt])
+      expect(() => combineSourceCleanBatchOutputs(plan, [text])).toThrow(/未覆盖/u)
+    })
+
+    it.each([
+      ['five-digit abbreviated row', `${prefix}00001、00002`],
+      ['seven-digit row with a valid six-digit prefix', `${validId}0`],
+      ['seven-digit zero-padded row', `${prefix}0000001`],
+      ['unknown six-digit row', `${prefix}999999`],
+      ['unknown hash', 'POR-R-DEADBEEF-000001'],
+      ['non-hexadecimal hash', 'POR-R-GHIJKLMN-000001'],
+      ['short hash', 'POR-R-ABCDEF0-000001'],
+      ['long hash', 'POR-R-ABCDEF012-000001'],
+      ['wrong case', validId.toLowerCase()],
+      ['missing row number', prefix],
+      ['non-numeric row suffix', `${validId}X`]
+    ])('rejects a %s by itself or beside a valid citation', (_label, invalidId) => {
+      for (const citations of [invalidId, `${validId}、${invalidId}`]) {
+        const text = output(citations)
+        expect(missingSourceCleanEvidenceIds(context, text, 'semantic_rows')).toEqual([context.coverageReceipt])
+        expect(() => combineSourceCleanBatchOutputs(plan, [text])).toThrow(/未覆盖/u)
+      }
+    })
+
+    it('accepts exact allowed references in Markdown without copying or renumbering rows', () => {
+      const text = output(`**${validId}**、\`${context.evidenceIds[1]}\`、__${validId}__`)
+      expect(missingSourceCleanEvidenceIds(context, text, 'semantic_rows')).toEqual([])
+      expect(combineSourceCleanBatchOutputs(plan, [text])).toContain(text.split('\n').slice(1).join('\n'))
+    })
+
+    it('still requires the matching receipt after valid row citations', () => {
+      const text = output(validId).replace(`COVERAGE:${context.coverageReceipt}`, 'COVERAGE:another-batch')
+      expect(missingSourceCleanEvidenceIds(context, text, 'semantic_rows')).toEqual([context.coverageReceipt])
+    })
   })
 
   it('reports why an ultra-wide table cannot use row verification', () => {
