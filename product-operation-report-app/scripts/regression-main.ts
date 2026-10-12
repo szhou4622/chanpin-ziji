@@ -2034,18 +2034,18 @@ function testManagedModelIsolation(): void {
   assert.equal(managedModelInternals.parseConfig({ ...validConfig, fallbackModels: ['a', 'b', 'c', 'd'] }).profile, null)
   assert.deepEqual(
     managedModelInternals.parseConfig({ ...validConfig, model: 'gpt-5.5', fallbackModels: undefined }).profiles.map((item) => item.model),
-    ['gpt-5.5', 'claude-sonnet-4-6', 'gemini-3-flash', 'kimi-k2.6']
+    ['gpt-5.5']
   )
   assert.deepEqual(
     managedModelInternals.parseConfig({ ...validConfig, model: 'gpt-5.6-sol', fallbackModels: undefined }).profiles.map((item) => item.model),
-    ['gpt-5.6-sol', 'gpt-5.5', 'claude-sonnet-4-6']
+    ['gpt-5.6-sol']
   )
 
   process.env.PRODUCT_REPORT_MANAGED_MODEL_CONFIG_JSON = JSON.stringify(validConfig)
   assert.equal(getManagedModelState().mode, 'proxy', 'normal development startup must exercise the production proxy path')
   assert.deepEqual(getActiveProfiles().map((item) => item.model),
-    ['gpt-5.6-sol', 'gpt-5.5', 'claude-sonnet-4-6'],
-    'the active proxy route must use Sol, then GPT-5.5, then the retained Claude backup')
+    ['doubao-seed-2-1-pro-260915'],
+    'the active proxy route must use only the configured Ark model')
   assert.notEqual(getActiveProfile()?.apiKey, secret, '开发开关未启用时必须忽略模型环境变量')
   const proxyRendererSettings = loadRendererSettings()
   assert.equal(proxyRendererSettings.profiles.length, 0)
@@ -2247,8 +2247,8 @@ async function testModelFallbackSequence(): Promise<void> {
   const attempts: string[] = []
   assert.deepEqual(
     profilesForTask(profiles, 'module_benchmark').map((item) => item.model),
-    ['gpt-5.6-sol', 'gpt-5.5'],
-    'only M4 receives the dedicated sol to gpt-5.5 sequence'
+    ['gpt-5.6-sol'],
+    'M4 must not inject a different provider model into the configured sequence'
   )
   assert.deepEqual(
     profilesForTask(profiles, 'module_product_info').map((item) => item.model),

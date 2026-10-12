@@ -13,7 +13,9 @@ fi
 install -d -m 0750 -o root -g product-report-proxy /etc/product-operation-report
 install -m 0755 product_report_proxy.py /opt/product-operation-report/product_report_proxy.py
 install -m 0644 provider_keyring.py /opt/product-operation-report/provider_keyring.py
+install -m 0644 provider_config.py /opt/product-operation-report/provider_config.py
 install -m 0750 rotate_provider_key.py /usr/local/sbin/product-report-rotate-key
+install -m 0644 provider_config.py /usr/local/sbin/provider_config.py
 install -m 0644 product-report-proxy.service /etc/systemd/system/product-report-proxy.service
 install -d -m 0755 /etc/nginx/snippets /etc/nginx/conf.d
 install -m 0644 nginx-proxy-common.conf /etc/nginx/snippets/product-operation-report-proxy.conf

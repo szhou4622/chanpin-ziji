@@ -156,29 +156,31 @@ class ProxyLedgerTests(unittest.TestCase):
         normal = {"model": "gpt-5.5"}
         proxy.apply_server_task_options(benchmark, "module_benchmark")
         proxy.apply_server_task_options(normal, "module_product_info")
-        self.assertEqual(benchmark["tools"], [{"type": "web_search"}])
+        self.assertEqual(benchmark["tools"], [{"type": "web_search", "max_keyword": 2, "limit": 10}])
         self.assertEqual(benchmark["tool_choice"], "required")
-        self.assertEqual(benchmark["include"], ["web_search_call.action.sources"])
+        self.assertNotIn("include", benchmark)
         self.assertNotIn("tools", normal)
 
     def test_benchmark_request_is_converted_to_responses_api_shape(self) -> None:
         body = proxy.responses_request_body({
-            "model": "gpt-5.6-sol",
+            "model": proxy.MANAGED_MODEL,
             "messages": [
-                {"role": "system", "content": "只使用可靠来源"},
-                {"role": "user", "content": "搜索酸菜品牌"},
+                {"role": "system", "content": "Only use reliable sources"},
+                {"role": "user", "content": "Search benchmark brands"},
             ],
-            "max_completion_tokens": 5000,
+            "max_tokens": 7000,
         })
-        self.assertEqual(body["model"], "gpt-5.6-sol")
-        self.assertEqual(body["instructions"], "只使用可靠来源")
-        self.assertEqual(body["input"], [{"role": "user", "content": "搜索酸菜品牌"}])
+        self.assertEqual(body["model"], proxy.MANAGED_MODEL)
+        self.assertEqual(body["instructions"], "Only use reliable sources")
+        self.assertEqual(body["input"], [{"role": "user", "content": "Search benchmark brands"}])
+        self.assertEqual(body["max_output_tokens"], 7000)
         self.assertEqual(body["tool_choice"], "required")
-        self.assertEqual(body["include"], ["web_search_call.action.sources"])
-        self.assertEqual(body["tools"][0]["type"], "web_search")
-        self.assertTrue(body["tools"][0]["external_web_access"])
-        self.assertEqual(body["tools"][0]["return_token_budget"], "unlimited")
-        self.assertEqual(body["reasoning"], {"effort": "high"})
+        self.assertNotIn("include", body)
+        self.assertEqual(body["tools"], [{"type": "web_search", "max_keyword": 2, "limit": 10}])
+        self.assertEqual(body["thinking"], {"type": "enabled"})
+        self.assertEqual(body["reasoning_effort"], "high")
+        self.assertEqual(body["max_tool_calls"], 1)
+        self.assertFalse(body["store"])
 
     def test_responses_completed_event_exposes_text_usage_and_search_sources(self) -> None:
         event = {
@@ -205,11 +207,10 @@ class ProxyLedgerTests(unittest.TestCase):
         self.assertEqual(evidence[0]["url"], "https://brand.tmall.com/store")
 
     def test_benchmark_task_has_a_server_enforced_model_route(self) -> None:
-        self.assertEqual(proxy.model_for_task("module_benchmark", "gpt-5.6-sol"), "gpt-5.6-sol")
-        self.assertEqual(proxy.model_for_task("module_benchmark", "gpt-5.5"), "gpt-5.5")
-        with self.assertRaises(proxy.ApiError):
-            proxy.model_for_task("module_benchmark", "claude-sonnet-4-6")
-        self.assertEqual(proxy.model_for_task("module_product_info", "gpt-5.5"), "gpt-5.5")
+        self.assertEqual(proxy.model_for_task("module_benchmark", proxy.MANAGED_MODEL), proxy.MANAGED_MODEL)
+        for legacy in ("gpt-5.6-sol", "gpt-5.5", "claude-sonnet-4-6"):
+            with self.assertRaises(proxy.ApiError):
+                proxy.model_for_task("module_benchmark", legacy)
 
     def test_gpt56_sol_price_is_registered_without_changing_gpt55(self) -> None:
         self.assertEqual(proxy.MODEL_PRICES["gpt-5.5"], (1.25, 7.5, 0.125, 0.8))
@@ -635,15 +636,15 @@ class ProxyLedgerTests(unittest.TestCase):
         self.assertGreater(cost, requested_cost)
 
     def test_model_specific_route_can_use_an_independent_provider(self) -> None:
-        original_base = proxy.PROVIDER_ROUTES["claude-sonnet-4-6"][0]
-        original_key = proxy.PROVIDER_ROUTES["claude-sonnet-4-6"][1]
+        original_base = proxy.PROVIDER_ROUTES[proxy.MANAGED_MODEL][0]
+        original_key = proxy.PROVIDER_ROUTES[proxy.MANAGED_MODEL][1]
         try:
-            proxy.PROVIDER_ROUTES["claude-sonnet-4-6"] = ("https://backup.example/v1", "backup-key")
+            proxy.PROVIDER_ROUTES[proxy.MANAGED_MODEL] = ("https://backup.example/v1", "backup-key")
             self.assertEqual(
-                proxy.provider_route("claude-sonnet-4-6"), ("https://backup.example/v1", "backup-key")
+                proxy.provider_route(proxy.MANAGED_MODEL), ("https://backup.example/v1", "backup-key")
             )
         finally:
-            proxy.PROVIDER_ROUTES["claude-sonnet-4-6"] = (original_base, original_key)
+            proxy.PROVIDER_ROUTES[proxy.MANAGED_MODEL] = (original_base, original_key)
 
     def test_higher_response_model_price_is_not_capped_by_cheaper_request_reserve(self) -> None:
         request_id = "e57e23b0-2e3f-4b3b-8af2-000000000001"
@@ -704,31 +705,31 @@ class ProviderKeyringTests(unittest.TestCase):
 
     def test_atomic_rotation_changes_only_new_request_snapshots(self) -> None:
         self.write_keyring(1, "key-a", {"key-a": "secret-a-0000000001"})
-        old_request = self.keyring.active("gpt-5.5")
+        old_request = self.keyring.active(proxy.MANAGED_MODEL)
         self.write_keyring(2, "key-b", {
             "key-a": "secret-a-0000000001",
             "key-b": "secret-b-0000000002",
         })
-        new_request = self.keyring.active("gpt-5.5")
+        new_request = self.keyring.active(proxy.MANAGED_MODEL)
         self.assertEqual(old_request.key_id, "key-a")
         self.assertEqual(new_request.key_id, "key-b")
         self.assertEqual(old_request.key_id, "key-a", "in-flight snapshot must remain immutable")
-        self.assertEqual([route.key_id for route in self.keyring.candidates("gpt-5.5")], ["key-b", "key-a"])
+        self.assertEqual([route.key_id for route in self.keyring.candidates(proxy.MANAGED_MODEL)], ["key-b", "key-a"])
 
     def test_invalid_replacement_keeps_last_known_good_without_exposing_secrets(self) -> None:
         self.write_keyring(1, "key-a", {"key-a": "secret-a-0000000001"})
-        self.assertEqual(self.keyring.active("gpt-5.5").key_id, "key-a")
+        self.assertEqual(self.keyring.active(proxy.MANAGED_MODEL).key_id, "key-a")
         temporary = self.path.with_suffix(".tmp")
         temporary.write_text('{"version":1,"profiles":', encoding="utf-8")
         os.chmod(temporary, 0o600)
         os.replace(temporary, self.path)
-        self.assertEqual(self.keyring.active("gpt-5.5").key_id, "key-a")
+        self.assertEqual(self.keyring.active(proxy.MANAGED_MODEL).key_id, "key-a")
         health_text = json.dumps(self.keyring.health())
         self.assertIn("last_known_good", health_text)
         self.assertNotIn("secret-a-0000000001", health_text)
 
     def test_missing_file_uses_existing_environment_route_for_compatibility(self) -> None:
-        active = self.keyring.active("claude-sonnet-4-6")
+        active = self.keyring.active(proxy.MANAGED_MODEL)
         self.assertEqual(active.base_url, "https://fallback.example/v1")
         self.assertEqual(active.key_id, "environment")
 
@@ -742,8 +743,8 @@ class ProviderKeyringTests(unittest.TestCase):
 
     def test_auth_failure_uses_standby_before_any_stream_is_returned(self) -> None:
         candidates = (
-            proxy.ProviderRouteSnapshot("gpt-5.5", "https://provider.example/v1", "key-b", "secret-b-0000000002"),
-            proxy.ProviderRouteSnapshot("gpt-5.5", "https://provider.example/v1", "key-a", "secret-a-0000000001"),
+            proxy.ProviderRouteSnapshot(proxy.MANAGED_MODEL, "https://provider.example/v1", "key-b", "secret-b-0000000002"),
+            proxy.ProviderRouteSnapshot(proxy.MANAGED_MODEL, "https://provider.example/v1", "key-a", "secret-a-0000000001"),
         )
         successful_stream = object()
         authorizations = []
@@ -761,8 +762,8 @@ class ProviderKeyringTests(unittest.TestCase):
 
     def test_non_auth_provider_failure_does_not_try_a_second_key(self) -> None:
         candidates = (
-            proxy.ProviderRouteSnapshot("gpt-5.5", "https://provider.example/v1", "key-b", "secret-b-0000000002"),
-            proxy.ProviderRouteSnapshot("gpt-5.5", "https://provider.example/v1", "key-a", "secret-a-0000000001"),
+            proxy.ProviderRouteSnapshot(proxy.MANAGED_MODEL, "https://provider.example/v1", "key-b", "secret-b-0000000002"),
+            proxy.ProviderRouteSnapshot(proxy.MANAGED_MODEL, "https://provider.example/v1", "key-a", "secret-a-0000000001"),
         )
         calls = []
 

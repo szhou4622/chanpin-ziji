@@ -23,9 +23,7 @@ function loadPublicConfig() {
       ...local,
       fallbackModels: Array.isArray(local.fallbackModels)
         ? local.fallbackModels
-        : (String(local.model).toLowerCase() === 'gpt-5.5'
-            ? ['claude-sonnet-4-6', 'gemini-3-flash', 'kimi-k2.6']
-            : [])
+        : []
     }
   }
 
@@ -41,9 +39,7 @@ function loadPublicConfig() {
     model: profile.model,
     supportsVision: profile.supportsVision !== false,
     temperature: profile.temperature ?? 0.3,
-    fallbackModels: profile.model.toLowerCase() === 'gpt-5.5'
-      ? ['claude-sonnet-4-6', 'gemini-3-flash', 'kimi-k2.6']
-      : []
+    fallbackModels: []
   }
 }
 
@@ -76,7 +72,8 @@ async function testKey(config, apiKey) {
           { role: 'user', content: '请只回复两个字：可用' }
         ],
         temperature: Number(config.temperature) || 0.3,
-        stream: false
+        stream: false,
+        ...(model.startsWith('doubao-') ? { thinking: { type: 'disabled' }, max_tokens: 16 } : {})
       }),
       signal: AbortSignal.timeout(20_000)
     })

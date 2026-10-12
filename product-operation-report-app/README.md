@@ -3,7 +3,7 @@
 把「产品经营报告」这套 SOP 能力做成本地桌面软件：手动上传自有/竞品/素材数据，自动完成清洗与分析，在资料整理和报告初稿两个节点由用户确认，生成可讲解、可落地的产品经营报告。
 
 - 形态：Electron + React + TypeScript 桌面应用（Windows + Mac）
-- 模型：正式安装包只连接产品经营报告业务代理，普通用户无需填写或接触 API Key；模型供应商密钥只保存在服务器
+- 模型：正式安装包通过产品经营报告业务代理调用方舟 `doubao-seed-2-1-pro-260915`，普通用户无需填写或接触 API Key；模型供应商密钥只保存在服务器
 - 数据：手动上传截图 / CSV / XLSX / PDF / Word / PPTX / Markdown / TXT / ZIP
 - 交互：对话主体 + SOP 进度侧栏；两次简单确认；支持新建分析和恢复上一份
 - 输出：Markdown + Word（飞书推送二期接）
@@ -28,6 +28,9 @@ npm run dist:win   # 打包 Windows nsis
 开发机可执行 `npm run config:managed:import`，将当前 Windows 用户已加密保存的模型配置迁移为仍由系统加密保护的
 `managed-model.local.json`。该文件已被 Git 忽略，禁止提交真实 API Key。正式构建不会读取、复制或生成任何
 供应商 API Key 配置，统一请求 `https://api.dadaozixun.com/api/product-operation-report/v1`，并使用服务器下发的短期设备会话。
+
+所有任务（包括 M4 对标搜索）使用同一个豆包模型，没有旧模型自动备用。服务器配置及协调升级步骤见
+[代理迁移说明](../server-updates/points-proxy-v1/README.md#豆包-21-迁移)。本分支不包含真实 Key，不会自动部署服务器或发布安装包。
 
 ## GitHub 自动打包
 

@@ -1,15 +1,11 @@
 {
   "version": 1,
   "enabled": true,
-  "name": "CCG 内置 AI 服务",
-  "baseURL": "https://ccg-cli.online/v1",
+  "name": "豆包 2.1 Pro",
+  "baseURL": "https://ark.cn-beijing.volces.com/api/v3",
   "apiKey": "replace-with-private-api-key",
-  "model": "gpt-5.5",
+  "model": "doubao-seed-2-1-pro-260915",
   "supportsVision": true,
   "temperature": 0.3,
-  "fallbackModels": [
-    "claude-sonnet-4-6",
-    "gemini-3-flash",
-    "kimi-k2.6"
-  ]
+  "fallbackModels": []
 }

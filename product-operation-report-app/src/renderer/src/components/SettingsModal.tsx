@@ -9,6 +9,7 @@ import type {
   TestModelResult
 } from '../../../shared/types'
 import { useStore } from '../store'
+import { ARK_BASE_URL, MANAGED_MODEL } from '../../../shared/modelConfig'
 
 const DEFAULT_PROFILE_NAME = 'ai英雄会'
 const LEGACY_DEFAULT_PROFILE_NAME = '中转API（ai英雄会）'
@@ -63,9 +64,9 @@ function createProfile(name = DEFAULT_PROFILE_NAME): ModelProfile {
   return {
     id: crypto.randomUUID(),
     name,
-    baseURL: 'https://cool.ai123321.com/v1',
+    baseURL: ARK_BASE_URL,
     apiKey: '',
-    model: 'gpt-5.5',
+    model: MANAGED_MODEL,
     supportsVision: true,
     temperature: 0.3
   }
@@ -780,9 +781,9 @@ export default function SettingsModal(): JSX.Element | null {
                   type="text"
                   value={selected.baseURL}
                   onChange={(e) => patch({ baseURL: e.target.value })}
-                  placeholder="https://cool.ai123321.com/v1"
+                  placeholder={ARK_BASE_URL}
                 />
-                <div className="hint">OpenAI 兼容端点，末尾到 /v1 即可（会自动补 /chat/completions）。</div>
+                <div className="hint">填写服务提供方的 Base URL，会自动补 /chat/completions。</div>
               </div>
                 <div className="field">
                 <label>模型名</label>
@@ -791,7 +792,7 @@ export default function SettingsModal(): JSX.Element | null {
                     type="text"
                     value={selected.model}
                     onChange={(e) => patch({ model: e.target.value })}
-                    placeholder="gpt-5.5"
+                    placeholder={MANAGED_MODEL}
                   />
                   <button
                     className="btn"

@@ -299,7 +299,8 @@ export async function testModel(opts: TestModelOptions): Promise<TestModelResult
         model: profile.model,
         messages: toOpenAIMessages(messages, profile.supportsVision && !!withImageDataUrl, profile.model),
         ...(profile.temperature === undefined ? {} : { temperature: profile.temperature }),
-        stream: false
+        stream: false,
+        ...(profile.model.startsWith('doubao-') ? { thinking: { type: 'disabled' }, max_tokens: 128 } : {})
       }),
       signal: AbortSignal.timeout(timeoutMs)
     })
@@ -399,8 +400,11 @@ export async function chatStream(
         ...(profile.temperature === undefined ? {} : { temperature: profile.temperature }),
         stream: true,
         stream_options: { include_usage: true },
-        ...(withPromptCache && policy?.promptCacheKey ? { prompt_cache_key: policy.promptCacheKey } : {}),
-        ...(withReasoningEffort && policy?.reasoningEffort
+        ...(withPromptCache && policy?.promptCacheKey && !profile.model.startsWith('doubao-') ? { prompt_cache_key: policy.promptCacheKey } : {}),
+        ...(profile.model.startsWith('doubao-') && policy?.reasoningEffort === 'low'
+          ? { thinking: { type: 'disabled' } }
+          : {}),
+        ...(withReasoningEffort && policy?.reasoningEffort && !profile.model.startsWith('doubao-')
           ? { reasoning_effort: policy.reasoningEffort }
           : {})
       }),

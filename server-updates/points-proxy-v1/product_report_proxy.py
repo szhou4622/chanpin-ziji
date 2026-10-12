@@ -25,6 +25,7 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, ROUND_CEILING
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -32,6 +33,7 @@ from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
 from provider_keyring import ProviderKeyring, ProviderRouteSnapshot
+from provider_config import ALLOWED_MODELS, ARK_BASE_URL, ARK_MODEL_PRICES_CNY, MANAGED_MODEL
 
 
 APP_NAME = "ProductOperationReport"
@@ -50,7 +52,7 @@ LICENSE_ACTIVATE_URL = os.environ.get(
 LICENSE_CONSUME_URL = os.environ.get(
     "POR_LICENSE_CONSUME_URL", "http://127.0.0.1:8791/api/license/credits/consume"
 )
-PROVIDER_BASE_URL = os.environ.get("POR_PROVIDER_BASE_URL", "https://ccg-cli.online/v1").rstrip("/")
+PROVIDER_BASE_URL = os.environ.get("POR_PROVIDER_BASE_URL", ARK_BASE_URL).rstrip("/")
 PROVIDER_API_KEY = os.environ.get("POR_PROVIDER_API_KEY", "").strip()
 PROVIDER_KEYS_FILE = os.environ.get(
     "POR_PROVIDER_KEYS_FILE", "/etc/product-operation-report/provider-keys.json"
@@ -61,7 +63,7 @@ USD_CNY_RATE = max(1.0, float(os.environ.get("POR_USD_CNY_RATE", "7.2")))
 POINTS_PER_CNY = max(1.0, float(os.environ.get("POR_POINTS_PER_CNY", "100")))
 COST_RATE = max(0.01, min(1.0, float(os.environ.get("POR_COST_RATE", "0.5"))))
 CHARGE_MULTIPLIER = 1.0 / COST_RATE
-WEB_SEARCH_USD_PER_CALL = max(0.0, float(os.environ.get("POR_WEB_SEARCH_USD_PER_CALL", "0")))
+WEB_SEARCH_USD_PER_CALL = max(0.0, float(os.environ.get("POR_WEB_SEARCH_USD_PER_CALL", str(0.004 / USD_CNY_RATE))))
 WEB_SEARCH_REPORT_LIMIT = max(1, min(50, int(os.environ.get("POR_WEB_SEARCH_REPORT_LIMIT", "14"))))
 MAX_BODY_BYTES = 96 * 1024 * 1024
 MAX_MESSAGES = 64
@@ -88,7 +90,6 @@ STREAM_HEARTBEAT_SECONDS = 20.0
 REQUEST_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}(?::fallback:[1-3])?$", re.I)
 SAFE_TEXT_RE = re.compile(r"^[\w.:-]{1,200}$", re.UNICODE)
 IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-ALLOWED_MODELS = ("gpt-5.5", "gpt-5.6-sol", "claude-sonnet-4-6", "gemini-3-flash", "kimi-k2.6")
 ALLOWED_TASK_TYPES = (
     "source_clean", "summary", "analysis_step", "final_part", "revision_part",
     "module_product_info", "module_platform_audience", "module_material_review",
@@ -96,6 +97,8 @@ ALLOWED_TASK_TYPES = (
     "module_audience_sp_scene",
 )
 MODEL_PRICES = {
+    # Retain legacy rates for already-recorded requests; new requests allow only Ark.
+    MANAGED_MODEL: tuple(rate / USD_CNY_RATE for rate in ARK_MODEL_PRICES_CNY),
     "gpt-5.5": (1.25, 7.5, 0.125, 0.8),
     "gpt-5.6-sol": (1.25, 10.0, 0.125, 1.0),
     "claude-sonnet-4-6": (0.4, 2.0, 0.04, 0.2),
@@ -103,16 +106,10 @@ MODEL_PRICES = {
     "kimi-k2.6": (0.8, 4.0, 0.08, 0.4),
 }
 MODEL_ENV_PREFIXES = {
-    "gpt-5.5": "GPT55",
-    "gpt-5.6-sol": "GPT56_SOL",
-    "claude-sonnet-4-6": "CLAUDE_SONNET_46",
-    "gemini-3-flash": "GEMINI_3_FLASH",
-    "kimi-k2.6": "KIMI_K26",
+    MANAGED_MODEL: "DOUBAO_SEED_21_PRO",
 }
 TASK_MODEL_ROUTES = {
-    # The packaged client chooses this ordered pair. The server still enforces
-    # that an untrusted renderer cannot use another model for benchmark work.
-    "module_benchmark": ("gpt-5.6-sol", "gpt-5.5"),
+    "module_benchmark": (MANAGED_MODEL,),
 }
 PROVIDER_ROUTES = {
     model: (
@@ -605,8 +602,8 @@ def consume_authoritative_credits(
     return round(remaining * 1000), unlimited
 
 
-def pricing(model: str = "gpt-5.5") -> dict[str, Any]:
-    values = MODEL_PRICES.get(model, MODEL_PRICES["gpt-5.5"])
+def pricing(model: str = MANAGED_MODEL) -> dict[str, Any]:
+    values = MODEL_PRICES.get(model, MODEL_PRICES[MANAGED_MODEL])
     return {
         "model": model, "currency": "USD", "inputUsdPerMillion": values[0],
         "outputUsdPerMillion": values[1], "cachedInputUsdPerMillion": values[2],
@@ -846,9 +843,10 @@ def search_event_details(event: dict[str, Any]) -> tuple[list[dict[str, str]], l
     response_output = response.get("output") if isinstance(response.get("output"), list) else []
     item = event.get("item") if isinstance(event.get("item"), dict) else {}
     items = [item, *[candidate for candidate in response_output[:32] if isinstance(candidate, dict)]]
-    if "web_search" in event_type or "search_call" in event_type:
+    event_call_id = text(event.get("item_id") or event.get("id"), 200)
+    if event_call_id and ("web_search" in event_type or "search_call" in event_type):
         calls.append({
-            "callId": text(event.get("id"), 200) or f"search-{hashlib.sha256(event_type.encode()).hexdigest()[:12]}",
+            "callId": event_call_id,
             "query": text(event.get("query") or action.get("query"), 500),
         })
     for output_item in items:
@@ -948,16 +946,17 @@ def responses_request_body(chat_body: dict[str, Any]) -> dict[str, Any]:
         "instructions": "\n\n".join(instructions),
         "input": input_items,
         "stream": True,
-        "max_output_tokens": chat_body.get("max_completion_tokens", 5000),
-        "reasoning": {"effort": "high"},
+        "max_output_tokens": chat_body.get("max_tokens", 5000),
+        "thinking": {"type": "enabled"},
+        "reasoning_effort": "high",
+        "store": False,
         "tools": [{
             "type": "web_search",
-            "search_context_size": "high",
-            "external_web_access": True,
-            "return_token_budget": "unlimited",
+            "max_keyword": 2,
+            "limit": 10,
         }],
         "tool_choice": "required",
-        "include": ["web_search_call.action.sources"],
+        "max_tool_calls": 1,
     }
 
 
@@ -980,7 +979,17 @@ def points_for_usage(model: str, input_tokens: int, output_tokens: int, cached: 
     input_rate, output_rate, cached_rate, created_rate = MODEL_PRICES[model]
     regular = max(0, input_tokens - cached - created)
     usd = (regular * input_rate + cached * cached_rate + created * created_rate + output_tokens * output_rate) / 1_000_000
-    cost_cny = usd * USD_CNY_RATE
+    if model == MANAGED_MODEL:
+        # Ark prices are denominated in CNY; exchange-rate settings must not
+        # change the cost of the same Ark request. No explicit stored cache is used.
+        rates = ARK_MODEL_PRICES_CNY
+        native_cost = sum(Decimal(tokens) * Decimal(str(rate)) for tokens, rate in zip(
+            (regular, output_tokens, cached, created), rates
+        )) / Decimal(1_000_000)
+        charged = native_cost * Decimal(str(POINTS_PER_CNY)) * Decimal(str(CHARGE_MULTIPLIER)) * 1000
+        return max(0, int(charged.to_integral_value(rounding=ROUND_CEILING))), max(0.0, float(native_cost))
+    else:
+        cost_cny = usd * USD_CNY_RATE
     charged_milli = math.ceil(cost_cny * POINTS_PER_CNY * CHARGE_MULTIPLIER * 1000)
     return max(0, charged_milli), max(0.0, cost_cny)
 
@@ -1047,10 +1056,12 @@ def points_for_verified_usage(requested_model: str, response_model: str | None, 
 def reserve_request(session: Session, request_id: str, report_id: str, task_key: str, task_type: str,
                     model: str, attempt: int, input_estimate: int, billing_request_id: str = "") -> int:
     output_reserve = min(MAX_OUTPUT_TOKENS, TASK_OUTPUT_RESERVES.get(task_type, MAX_OUTPUT_TOKENS))
-    reserve_candidates = [points_for_usage(candidate, input_estimate, output_reserve) for candidate in MODEL_PRICES]
+    reserve_models = ALLOWED_MODELS if model == MANAGED_MODEL else tuple(MODEL_PRICES)
+    reserve_candidates = [points_for_usage(candidate, input_estimate, output_reserve) for candidate in reserve_models]
     reserve, reserve_cost_cny = max(reserve_candidates, key=lambda item: item[0])
     if task_type == "module_benchmark" and WEB_SEARCH_USD_PER_CALL > 0:
-        search_cost_cny = WEB_SEARCH_USD_PER_CALL * USD_CNY_RATE
+        # Ark may issue two keywords in one tool round.
+        search_cost_cny = 2 * WEB_SEARCH_USD_PER_CALL * USD_CNY_RATE
         reserve += math.ceil(search_cost_cny * POINTS_PER_CNY * CHARGE_MULTIPLIER * 1000)
         reserve_cost_cny += search_cost_cny
     with database() as db:
@@ -1408,6 +1419,10 @@ def provider_usage(payload: dict[str, Any]) -> dict[str, Any] | None:
         "cache_creation_input_tokens": created_tokens,
         "response_model": text(payload.get("model") or response.get("model"), 200),
     }
+    tool_usage = usage.get("tool_usage") if isinstance(usage.get("tool_usage"), dict) else {}
+    search_calls = usage_integer(tool_usage.get("web_search", 0))
+    if "web_search" in tool_usage and search_calls is not None and 0 <= search_calls <= 1000:
+        result["web_search_calls"] = search_calls
     if any(result[name] < 0 or result[name] > 2_000_000_000 for name in (
         "input_tokens", "output_tokens", "cached_input_tokens", "cache_creation_input_tokens"
     )):
@@ -1440,6 +1455,8 @@ def merge_provider_usage(previous: dict[str, Any] | None, current: dict[str, Any
         "cached_input_tokens": cached,
         "cache_creation_input_tokens": created,
         "response_model": current.get("response_model") or previous.get("response_model") or "",
+        **({"web_search_calls": max(previous.get("web_search_calls", 0), current.get("web_search_calls", 0))}
+           if "web_search_calls" in previous or "web_search_calls" in current else {}),
     }
 
 
@@ -1522,10 +1539,15 @@ def provider_stream_completed(saw_done: bool, finish_reason: str, usage: dict[st
 
 
 def apply_server_task_options(upstream_body: dict[str, Any], task_type: str) -> None:
+    # Only forward Ark-supported options. Client cache hints remain local.
+    upstream_body.pop("prompt_cache_key", None)
+    upstream_body.pop("reasoning_effort", None)
+    if "max_completion_tokens" in upstream_body:
+        upstream_body["max_tokens"] = upstream_body.pop("max_completion_tokens")
+    upstream_body["thinking"] = {"type": "disabled" if task_type in ("source_clean", "summary") else "enabled"}
     if task_type == "module_benchmark":
-        upstream_body["tools"] = [{"type": "web_search"}]
+        upstream_body["tools"] = [{"type": "web_search", "max_keyword": 2, "limit": 10}]
         upstream_body["tool_choice"] = "required"
-        upstream_body["include"] = ["web_search_call.action.sources"]
 
 
 def mark_upstream_submitted(request_id: str) -> None:
@@ -1712,15 +1734,10 @@ class Handler(BaseHTTPRequestHandler):
             "messages": body["messages"],
             "stream": True,
             "stream_options": {"include_usage": True},
-            "max_completion_tokens": output_limit,
+            "max_tokens": output_limit,
         }
-        prompt_cache_key = text(body.get("prompt_cache_key"), 200)
-        if prompt_cache_key and SAFE_TEXT_RE.fullmatch(prompt_cache_key):
-            upstream_body["prompt_cache_key"] = prompt_cache_key
         if temperature is not None:
             upstream_body["temperature"] = float(temperature)
-        if task_type in ("source_clean", "summary") and body.get("reasoning_effort") == "low":
-            upstream_body["reasoning_effort"] = "low"
         # The server, not the untrusted client, decides which task may search.
         apply_server_task_options(upstream_body, task_type)
         uses_responses_api = task_type == "module_benchmark"
@@ -1919,7 +1936,7 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             final_status = "partial" if sent_content else "failed"
         finally:
-            search_calls = len(search_call_ids)
+            search_calls = max(len(search_call_ids), (usage or {}).get("web_search_calls", 0)) if task_type == "module_benchmark" else 0
             settle_request(session, request_id, final_status, model, usage, input_estimate, output_chars, sent_content, search_calls)
 
 

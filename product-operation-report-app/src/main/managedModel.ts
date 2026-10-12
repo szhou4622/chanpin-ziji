@@ -3,19 +3,12 @@ import { existsSync, readFileSync, statSync } from 'fs'
 import { isAbsolute, join, resolve } from 'path'
 import type { ManagedModelInfo, ModelProfile } from '../shared/types'
 import { AI_PROXY_BASE_URL } from './serviceConfig'
+import { MANAGED_MODEL } from '../shared/modelConfig'
 
 const MAX_CONFIG_BYTES = 32 * 1024
 const MANAGED_PROFILE_ID = 'managed-model'
 const MAX_FALLBACK_MODELS = 3
-export const DEFAULT_MANAGED_FALLBACK_MODELS = [
-  'gpt-5.5',
-  'claude-sonnet-4-6'
-] as const
-const LEGACY_GPT55_FALLBACK_MODELS = [
-  'claude-sonnet-4-6',
-  'gemini-3-flash',
-  'kimi-k2.6'
-] as const
+export const DEFAULT_MANAGED_FALLBACK_MODELS: readonly string[] = []
 
 interface ManagedModelFile {
   version?: number
@@ -61,9 +54,7 @@ function invalidState(message = '内置模型服务配置不可用，请联系�
 
 function fallbackModelNames(input: ManagedModelFile, primaryModel: string): string[] | null {
   const configured = input.fallbackModels === undefined
-    ? (primaryModel.toLowerCase() === 'gpt-5.6-sol'
-        ? [...DEFAULT_MANAGED_FALLBACK_MODELS]
-        : primaryModel.toLowerCase() === 'gpt-5.5' ? [...LEGACY_GPT55_FALLBACK_MODELS] : [])
+    ? [...DEFAULT_MANAGED_FALLBACK_MODELS]
     : input.fallbackModels
   if (!Array.isArray(configured) || configured.length > MAX_FALLBACK_MODELS) return null
   const result: string[] = []
@@ -183,7 +174,7 @@ export function getManagedModelState(): ManagedModelState {
       name: '内置 AI 服务',
       baseURL: AI_PROXY_BASE_URL,
       apiKey: 'short-lived-session-token',
-      model: 'gpt-5.6-sol',
+      model: MANAGED_MODEL,
       supportsVision: true,
       temperature: 0.3,
       fallbackModels: [...DEFAULT_MANAGED_FALLBACK_MODELS]
