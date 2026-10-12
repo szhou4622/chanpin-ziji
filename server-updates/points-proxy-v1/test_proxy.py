@@ -6,6 +6,7 @@ import os
 import sqlite3
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import uuid
@@ -286,6 +287,9 @@ class ProxyLedgerTests(unittest.TestCase):
         self.assertFalse(proxy.provider_stream_completed(False, "", None, True))
 
     def test_heartbeat_starts_before_provider_returns_response_headers(self) -> None:
+        opened = threading.Event()
+        release_headers = threading.Event()
+
         class Stream:
             def __enter__(self):
                 return self
@@ -297,13 +301,24 @@ class ProxyLedgerTests(unittest.TestCase):
                 yield b'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\n'
 
         def slow_open(*_args):
-            time.sleep(0.03)
+            opened.set()
+            if not release_headers.wait(5):
+                raise RuntimeError("test did not release response headers")
             return Stream()
 
         with patch.object(proxy, "open_provider_stream", side_effect=slow_open):
-            items = list(proxy.provider_request_items((), b"{}", "request", heartbeat_seconds=0.005))
-        self.assertEqual(items[0][0], "heartbeat")
-        self.assertTrue(any(kind == "line" for kind, _value in items))
+            items = proxy.provider_request_items((), b"{}", "request", heartbeat_seconds=0.005)
+            try:
+                # Hold headers until the heartbeat is observed. A 30 ms sleep
+                # raced Windows runner scheduling and intermittently returned
+                # the response line first despite correct heartbeat behavior.
+                self.assertEqual(next(items)[0], "heartbeat")
+                self.assertTrue(opened.wait(2))
+                release_headers.set()
+                self.assertTrue(any(kind == "line" for kind, _value in items))
+            finally:
+                release_headers.set()
+                items.close()
 
     def test_session_refresh_replaces_stale_proxy_balance_with_license_balance(self) -> None:
         payload = {

@@ -49,7 +49,7 @@ const DEVICE_NAMESPACE = 'product-operation-report:device:v1:'
 const TRANSITIONAL_DEVICE_NAMESPACE = 'product-operation-report:device:v2:'
 const OLD_DEVICE_NAMESPACE = DEVICE_NAMESPACE
 const OLD_ENCRYPTION_NAMESPACE = 'product-operation-report:server-code:v1:'
-const SESSION_ROTATION_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
+const SESSION_RENEWAL_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
 let cachedSystemMachineId: string | undefined
 let cachedLegacyDeviceId = ''
 let cachedTransitionalDeviceId = ''
@@ -339,7 +339,7 @@ function decodeDeviceSessionHint(session: string | undefined): DeviceSessionHint
   }
 }
 
-function sessionExpiresWithin(session: string | undefined, windowMs = SESSION_ROTATION_WINDOW_MS): boolean {
+function sessionExpiresWithin(session: string | undefined, windowMs = SESSION_RENEWAL_WINDOW_MS): boolean {
   const expiresAt = decodeDeviceSessionHint(session).expiresAt
   return expiresAt !== undefined && expiresAt > Date.now() && expiresAt - Date.now() <= windowMs
 }
@@ -964,7 +964,11 @@ async function requestServerActivation(
   try {
     const headers: Record<string, string> = { 'content-type': 'application/json', accept: 'application/json' }
     if (options.deviceSession) headers.authorization = `Bearer ${options.deviceSession}`
-    if (options.deviceCredential && !options.credentialInBody) headers['x-device-credential'] = options.deviceCredential
+    // An authenticated renewal needs both the header credential for session
+    // validation and the body credential for the server's already-bound path.
+    if (options.deviceCredential && (!options.credentialInBody || options.deviceSession)) {
+      headers['x-device-credential'] = options.deviceCredential
+    }
     const body: Record<string, unknown> = {
       license_protocol_version: LICENSE_PROTOCOL_VERSION,
       app_name: LICENSE_APP_NAME,
@@ -1414,15 +1418,56 @@ export async function getActivationStatusWithServerCheck(): Promise<ActivationSt
     clearRuntimeValidation()
     return toStatus(current, deviceId)
   }
-  const result = vault.deviceCredential && vault.deviceSession
+  if (vault.deviceCredential && !vault.deviceSession) {
+    const updated: ServerStoredActivation = {
+      ...sanitizedServerRecord(current),
+      requiresRevalidation: true,
+      authorizationState: 'session_expired',
+      revokedReason: undefined,
+      serverMessage: '本机设备会话缺失，请确认后使用已保存的凭证恢复授权。'
+    }
+    writeStoredActivation(updated)
+    clearRuntimeValidation()
+    return toStatus(updated, deviceId)
+  }
+  let result = vault.deviceCredential && vault.deviceSession
     ? await requestServerDeviceStatus(deviceId, current.licenseId, vault.deviceCredential, vault.deviceSession)
     : await requestServerActivation(vault.activationCode, deviceId, {
         currentCodeId: current.licenseId,
         credentialRefresh: true
       })
+  const credential = result.deviceCredential || vault.deviceCredential
+  let session = result.deviceSession || vault.deviceSession
+  if (result.ok && credential && session && sessionExpiresWithin(session)) {
+    const renewed = await requestServerActivation(vault.activationCode, deviceId, {
+      currentCodeId: current.licenseId,
+      deviceCredential: credential,
+      deviceSession: session,
+      credentialInBody: true
+    })
+    const safeRenewal = renewed.ok &&
+      renewed.licenseId === current.licenseId &&
+      renewed.bindingStatus === 'active' &&
+      renewed.action !== 'rebound' &&
+      renewed.action !== 'balance_merged' &&
+      renewed.deviceCredential === credential &&
+      Boolean(renewed.deviceSession) &&
+      (renewed.grantScore === undefined || renewed.grantScore === 0) &&
+      (renewed.transferCount === undefined || renewed.transferCount === result.transferCount)
+    if (safeRenewal) {
+      result = renewed
+      session = renewed.deviceSession
+    } else if (!renewed.unavailable) {
+      // A known revocation/unbind between status and renewal must not be hidden
+      // by the earlier successful status. Transient failures leave the old
+      // credential and still-valid session usable for the next attempt.
+      result = renewed.ok ? {
+        ...renewed, ok: false, contractInvalid: true,
+        message: '服务器续期响应与原授权不一致，已保留本机授权记录。'
+      } : renewed
+    }
+  }
   if (result.ok) {
-    let credential = result.deviceCredential || vault.deviceCredential
-    let session = result.deviceSession || vault.deviceSession
     if (!credential || !session) {
       const updated: ServerStoredActivation = {
         ...sanitizedServerRecord(current),
@@ -1434,27 +1479,7 @@ export async function getActivationStatusWithServerCheck(): Promise<ActivationSt
       clearRuntimeValidation()
       return toStatus(updated, deviceId)
     }
-    let effectiveResult = result
-    if (sessionExpiresWithin(session)) {
-      const rotated = await requestServerActivation(vault.activationCode, deviceId, {
-        currentCodeId: current.licenseId,
-        credentialRefresh: true,
-        deviceCredential: credential,
-        deviceSession: session
-      })
-      const safeRotation = rotated.ok &&
-        rotated.licenseId === current.licenseId &&
-        rotated.bindingStatus === 'active' &&
-        rotated.action !== 'rebound' &&
-        rotated.action !== 'balance_merged' &&
-        (rotated.transferCount === undefined || rotated.transferCount === result.transferCount)
-      if (safeRotation && rotated.deviceCredential && rotated.deviceSession) {
-        effectiveResult = rotated
-        credential = rotated.deviceCredential
-        session = rotated.deviceSession
-      }
-    }
-    const updated = entitlementRecord(current, vault.activationCode, deviceId, effectiveResult)
+    const updated = entitlementRecord(current, vault.activationCode, deviceId, result)
     persistLicenseVault(vault.activationCode, deviceId, updated.licenseId, credential, session)
     writeStoredActivation(updated)
     markValidationSuccess()
@@ -1705,17 +1730,18 @@ export async function activateWithCode(input: string): Promise<ActivationResult>
         ? {}
         : {
         currentCodeId: existing?.record.licenseId,
-        credentialRefresh: true,
+        credentialRefresh: existing?.vault?.deviceCredential ? undefined : true,
         deviceCredential: existing?.vault?.deviceCredential,
-        deviceSession: existing?.vault?.deviceSession
+        deviceSession: existing?.vault?.deviceSession,
+        credentialInBody: Boolean(existing?.vault?.deviceCredential)
       }
     : savedCodeRecovery
       ? savedVault?.deviceSession && !explicitRecovery
         ? {
             currentCodeId: savedVault.licenseId,
-            credentialRefresh: true,
             deviceCredential: savedVault.deviceCredential,
-            deviceSession: savedVault.deviceSession
+            deviceSession: savedVault.deviceSession,
+            credentialInBody: true
           }
         : {
             currentCodeId: savedVault?.licenseId,
@@ -1759,6 +1785,9 @@ export async function activateWithCode(input: string): Promise<ActivationResult>
   }
   const credential = result.deviceCredential || (samePrimary ? existing?.vault?.deviceCredential : savedCodeRecovery ? savedVault?.deviceCredential : undefined)
   const session = result.deviceSession || (samePrimary ? existing?.vault?.deviceSession : savedCodeRecovery ? savedVault?.deviceSession : undefined)
+  if (refreshOptions.deviceCredential && !refreshOptions.credentialRefresh && result.action !== 'rebound' && credential !== refreshOptions.deviceCredential) {
+    return { ok: false, message: '服务器返回的设备凭证与原授权不一致，已保留本机授权记录。', status: currentStatus }
+  }
   if (!credential || !session) {
     return { ok: false, message: '服务器没有返回完整的设备会话和设备凭证，本次未写入授权。', status: currentStatus }
   }
@@ -1868,6 +1897,9 @@ export async function deactivateCurrentDevice(): Promise<ActivationDeactivationR
   const before = getActivationStatus()
   if (!current || !before.activated) {
     return { ok: false, message: '本机当前没有可解除的服务器授权。', status: before }
+  }
+  if (current.vault?.deviceCredential && !current.vault.deviceSession) {
+    return { ok: false, message: '本机设备会话缺失，请先恢复本机授权再解除绑定。', status: before }
   }
   if (
     current.record.licenseId &&
