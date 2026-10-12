@@ -414,14 +414,32 @@ class ProtocolAdversarialTests(unittest.TestCase):
         self.assertEqual(len(self.upstream_calls), 1)
         self.assertFalse(self.debits)
 
-    def assert_actual_unsettled_cost_is_reserved(self, confirm_saved_first=False):
+    def configure_actual_cost_above_reservation(self):
         # Actual provider input may exceed the byte-based admission estimate.
-        # This result costs 27 points, despite its initial 16-point reservation.
-        self.balance_units = 32_000_000
+        # Keep precisely enough balance for two estimates, but not for the
+        # larger actual charge plus another estimate, at the current task cap.
+        output_limit = min(proxy.MAX_OUTPUT_TOKENS, proxy.TASK_OUTPUT_RESERVES['source_clean'])
+        reserved_units = fixtures.ArkV2Tests.expected_reserve(self, 'OK', output_limit)
+        actual_cost = proxy.v2_tariff_cost_cny(MANAGED_MODEL,
+            {'input_tokens': 10000, 'output_tokens': output_limit})
+        actual_units = proxy.billing_v2.amount_units(actual_cost,
+            str(proxy.POINTS_PER_CNY), str(proxy.COST_RATE))
+        initial_balance = reserved_units * 2
+        self.assertGreater(actual_units, reserved_units)
+        self.assertLess(actual_units, initial_balance)
+        self.assertLess(initial_balance - actual_units, reserved_units)
+        self.balance_units = initial_balance
         self.events = [chat_event("OK"),
-            chat_event(finish="stop", usage=chat_usage(prompt_tokens=10000, completion_tokens=2500))]
+            chat_event(finish="stop", usage=chat_usage(prompt_tokens=10000, completion_tokens=output_limit))]
+        return reserved_units, actual_units, initial_balance
+
+    def assert_actual_unsettled_cost_is_reserved(self, confirm_saved_first=False):
+        reserved_units, actual_units, initial_balance = self.configure_actual_cost_above_reservation()
         first_stream, request_id, logical_id = self.chat()
         self.assertIn("[DONE]", first_stream)
+        with proxy.database() as db:
+            self.assertEqual(db.execute('SELECT reserved_units FROM por_v2_attempts WHERE request_id=?',
+                                        (request_id,)).fetchone()[0], reserved_units)
         if confirm_saved_first:
             with patch.object(proxy, "PRECISE_BILLING_SOURCE", "pending"):
                 self.assertEqual(self.confirm_output(request_id, logical_id)["state"], "awaiting_bill")
@@ -433,8 +451,8 @@ class ProtocolAdversarialTests(unittest.TestCase):
         self.assertEqual(len(self.upstream_calls), 1)
         confirmed = self.confirm_output(request_id, logical_id)
         self.assertEqual(confirmed["state"], "charged")
-        self.assertEqual(confirmed["charged_units"], 27_000_000)
-        self.assertEqual(self.balance_units, 5_000_000)
+        self.assertEqual(confirmed["charged_units"], actual_units)
+        self.assertEqual(self.balance_units, initial_balance - actual_units)
         with self.assertRaises(HTTPError) as caught:
             self.chat()
         self.assertEqual(caught.exception.code, 402)
@@ -466,9 +484,7 @@ class ProtocolAdversarialTests(unittest.TestCase):
         self.assertIn("[DONE]", self.chat()[0])
 
     def test_expired_result_reclaims_actual_cost_without_taking_another_reservation(self):
-        self.balance_units = 32_000_000
-        self.events = [chat_event("OK"),
-            chat_event(finish="stop", usage=chat_usage(prompt_tokens=10000, completion_tokens=2500))]
+        _, actual_units, initial_balance = self.configure_actual_cost_above_reservation()
         _, request_id, logical_id = self.chat()
         with proxy.database() as db:
             db.execute("UPDATE por_v2_attempts SET finished_at='2000-01-01T00:00:00Z' WHERE request_id=?",
@@ -482,14 +498,14 @@ class ProtocolAdversarialTests(unittest.TestCase):
         with proxy.database() as db:
             state = db.execute("SELECT state FROM por_v2_attempts WHERE request_id=?", (request_id,)).fetchone()[0]
         self.assertEqual(state, "receipt_expired_no_charge")
-        self.assertEqual(self.balance_units, 32_000_000)
+        self.assertEqual(self.balance_units, initial_balance)
         self.assertFalse(self.debits)
         rejected = json.loads(self.post("/billing/result/reject", {
             "request_id": second_request, "logical_task_id": second_logical},
             {"Authorization": "Bearer " + self.token}))
         self.assertEqual(rejected["state"], "failed_no_charge")
-        self.assertEqual(self.confirm_output(request_id, logical_id)["charged_units"], 27_000_000)
-        self.assertEqual(self.balance_units, 5_000_000)
+        self.assertEqual(self.confirm_output(request_id, logical_id)["charged_units"], actual_units)
+        self.assertEqual(self.balance_units, initial_balance - actual_units)
 
     def test_missing_provider_key_rejects_before_upstream_or_billing_admission(self):
         self.events = [chat_event("OK"), chat_event(finish="stop", usage=chat_usage())]

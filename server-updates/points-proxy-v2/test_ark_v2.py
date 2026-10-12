@@ -24,6 +24,9 @@ class ArkV2Tests(unittest.TestCase):
         self.debits = {}
         self.requests = []
         self.mode = 'success'
+        self.input_tokens = 1000
+        self.chat_output_parts = None
+        self.upstream_done = False
         owner = self
 
         class FakeUpstream(BaseHTTPRequestHandler):
@@ -69,12 +72,25 @@ class ArkV2Tests(unittest.TestCase):
                         {'type': 'response.completed' if owner.mode == 'success' else 'response.in_progress',
                          'response': response}]
                 else:
-                    events = [{'model': MANAGED_MODEL, 'choices': [{'delta': {'content': 'OK'}}]},
+                    output = 'OK'
+                    output_tokens = 1000
+                    finish_reason = 'stop' if owner.mode == 'success' else None
+                    if owner.chat_output_parts is not None:
+                        # Each synthetic part represents one token. Enforce the
+                        # real HTTP request's cap instead of assuming a successful
+                        # terminal response independently of the proxy's budget.
+                        limit = body['max_completion_tokens']
+                        output = ''.join(owner.chat_output_parts[:limit])
+                        output_tokens = min(limit, len(owner.chat_output_parts))
+                        finish_reason = 'length' if len(owner.chat_output_parts) > limit else finish_reason
+                    events = [{'model': MANAGED_MODEL, 'choices': [{'delta': {'content': output}}]},
                         {'model': MANAGED_MODEL, 'choices': [{'delta': {},
-                            'finish_reason': 'stop' if owner.mode == 'success' else None}],
-                         'usage': {'prompt_tokens': 1000, 'completion_tokens': 1000}}]
+                            'finish_reason': finish_reason}],
+                         'usage': {'prompt_tokens': owner.input_tokens, 'completion_tokens': output_tokens}}]
                 for event in events:
                     self.wfile.write(b'data: ' + json.dumps(event).encode() + b'\n\n')
+                if owner.upstream_done:
+                    self.wfile.write(b'data: [DONE]\n\n')
                 self.wfile.flush()
 
         class QuietProxy(proxy.Handler):
@@ -145,23 +161,111 @@ class ArkV2Tests(unittest.TestCase):
         with urlopen(request, timeout=10) as response:
             return response.read().decode()
 
-    def chat(self, task, model=MANAGED_MODEL, precise=True):
+    def chat(self, task, model=MANAGED_MODEL, precise=True, *, logical_id=None,
+             task_key=None, attempt=1, content='OK'):
         request_id = str(uuid.uuid4())
-        logical_id = 'offline:' + request_id
+        logical_id = logical_id or 'offline:' + request_id
         headers = {'Authorization': 'Bearer ' + self.token, 'x-request-id': request_id,
             'x-billing-request-id': logical_id, 'x-report-session-id': 'offline-report',
-            'x-task-key': task + ':' + request_id, 'x-task-type': task, 'x-task-attempt': '1'}
+            'x-task-key': task_key or task + ':' + request_id, 'x-task-type': task,
+            'x-task-attempt': str(attempt)}
         if precise:
             headers['x-result-confirmation-capable'] = '1'
         stream = self.post('/chat/completions', {'model': model,
-            'messages': [{'role': 'user', 'content': 'OK'}]}, headers)
+            'messages': [{'role': 'user', 'content': content}]}, headers)
         return stream, request_id, logical_id
 
-    def confirm(self, request_id, logical_id):
+    def confirm(self, request_id, logical_id, output='OK'):
         return json.loads(self.post('/billing/result/confirm', {'request_id': request_id,
-            'logical_task_id': logical_id, 'output_sha256': hashlib.sha256(b'OK').hexdigest(),
+            'logical_task_id': logical_id, 'output_sha256': hashlib.sha256(output.encode()).hexdigest(),
             'receipt_id': 'offline-receipt-' + request_id, 'locally_valid': True},
             {'Authorization': 'Bearer ' + self.token}))
+
+    @staticmethod
+    def stream_text(stream):
+        events = [json.loads(line[5:].strip()) for line in stream.splitlines()
+                  if line.startswith('data:') and line[5:].strip() not in ('', '[DONE]')]
+        return ''.join(choice.get('delta', {}).get('content', '')
+                       for event in events for choice in event.get('choices', []))
+
+    def expected_reserve(self, content, output_limit):
+        _, input_estimate = proxy.validate_messages({'model': MANAGED_MODEL,
+            'messages': [{'role': 'user', 'content': content}]})
+        reserve_milli = max(proxy.points_for_usage(model, input_estimate, output_limit)[0]
+                            for model in proxy.ALLOWED_MODELS)
+        return ((reserve_milli + 999) // 1000) * proxy.billing_v2.UNITS_PER_POINT
+
+    def test_source_clean_completes_above_old_cap_and_reserves_full_output_budget(self):
+        self.chat_output_parts = ['evidence '] * 6000 + ['\nCOVERAGE:OFFLINE-COMPLETE']
+        self.input_tokens = 14089
+        self.upstream_done = True
+        content = 'synthetic source row\n' * 900
+        stream, request_id, logical_id = self.chat('source_clean', content=content)
+        output_limit = self.requests[-1][1]['max_completion_tokens']
+        self.assertEqual(output_limit, proxy.MAX_OUTPUT_TOKENS)
+        self.assertGreater(output_limit, 2500)
+        self.assertEqual(self.requests[-1][1]['thinking'], {'type': 'disabled'})
+        self.assertEqual(self.stream_text(stream), ''.join(self.chat_output_parts))
+        self.assertIn('[DONE]', stream)
+        with proxy.database() as db:
+            row = db.execute('SELECT * FROM por_v2_attempts WHERE request_id=?', (request_id,)).fetchone()
+            self.assertEqual(row['state'], 'awaiting_receipt')
+            self.assertEqual(row['reserved_units'], self.expected_reserve(content, output_limit))
+            self.assertGreater(row['reserved_units'], self.expected_reserve(content, 2500))
+            self.assertEqual(json.loads(row['provider_usage_json'])['output_tokens'], 6001)
+        self.assertFalse(self.debits)
+        confirmed = self.confirm(request_id, logical_id, ''.join(self.chat_output_parts))
+        self.assertEqual(confirmed['state'], 'charged')
+        # Charge actual native token usage (6/30 CNY per million, times two),
+        # not the larger reserved output budget.
+        expected_cost = (Decimal(14089) * 6 + Decimal(6001) * 30) / 1_000_000
+        self.assertEqual(Decimal(self.debits[logical_id][4]), expected_cost)
+        self.assertLess(confirmed['charged_units'], row['reserved_units'])
+
+    def test_source_clean_length_with_usage_and_done_is_free_then_same_task_retries_once(self):
+        self.chat_output_parts = ['evidence '] * 6000 + ['\nCOVERAGE:OFFLINE-COMPLETE']
+        self.upstream_done = True
+        logical_id = 'offline:source-clean-retry'
+        task_key = 'offline:source:batch-v7-planned:1'
+        content = 'synthetic source row\n' * 900
+        with patch.dict(proxy.TASK_OUTPUT_RESERVES, {'source_clean': 2500}):
+            failed_stream, failed_id, _ = self.chat('source_clean', logical_id=logical_id,
+                task_key=task_key, content=content)
+        self.assertNotIn('[DONE]', failed_stream)
+        self.assertEqual(self.stream_text(failed_stream), ''.join(self.chat_output_parts[:2500]))
+        self.assertIn('"finish_reason":"length"', failed_stream.replace(' ', ''))
+        with proxy.database() as db:
+            failed = db.execute('SELECT * FROM por_v2_attempts WHERE request_id=?', (failed_id,)).fetchone()
+            self.assertEqual(failed['state'], 'failed_no_charge')
+            self.assertEqual(failed['reserved_units'], self.expected_reserve(content, 2500))
+            self.assertEqual(json.loads(failed['provider_usage_json'])['output_tokens'], 2500)
+            self.assertEqual(db.execute('SELECT state FROM por_v2_tasks WHERE logical_task_id=?',
+                                       (logical_id,)).fetchone()[0], 'retryable')
+        with self.assertRaises(HTTPError) as caught:
+            self.confirm(failed_id, logical_id, self.stream_text(failed_stream))
+        self.assertEqual(caught.exception.code, 409)
+        caught.exception.close()
+        self.assertFalse(self.debits)
+
+        stream, successful_id, retried_logical = self.chat('source_clean', logical_id=logical_id,
+            task_key=task_key, attempt=2, content=content)
+        self.assertEqual(retried_logical, logical_id)
+        self.assertNotEqual(successful_id, failed_id)
+        self.assertIn('[DONE]', stream)
+        self.assertEqual(self.stream_text(stream), ''.join(self.chat_output_parts))
+        first = self.confirm(successful_id, logical_id, self.stream_text(stream))
+        second = self.confirm(successful_id, logical_id, self.stream_text(stream))
+        self.assertEqual(first['state'], 'charged')
+        self.assertEqual(second['charged_units'], first['charged_units'])
+        self.assertEqual(len(self.debits), 1)
+        self.assertEqual(self.debits[logical_id][0], successful_id)
+        with proxy.database() as db:
+            rows = db.execute('SELECT request_id,state FROM por_v2_attempts WHERE logical_task_id=?',
+                              (logical_id,)).fetchall()
+            self.assertEqual({row['request_id']: row['state'] for row in rows},
+                             {failed_id: 'failed_no_charge', successful_id: 'charged'})
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM por_v2_ledger WHERE logical_task_id=?',
+                                       (logical_id,)).fetchone()[0], 1)
 
     def test_all_tasks_confirm_once_with_real_http_and_v2_ledger(self):
         for task in proxy.ALLOWED_TASK_TYPES:

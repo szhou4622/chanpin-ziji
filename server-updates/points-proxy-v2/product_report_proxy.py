@@ -89,7 +89,9 @@ MAX_IMAGE_BYTES = 16 * 1024 * 1024
 MAX_ACTIVE_PER_LICENSE = 4
 MAX_OUTPUT_TOKENS = max(1024, min(32768, int(os.environ.get("POR_MAX_OUTPUT_TOKENS", "12000"))))
 TASK_OUTPUT_RESERVES = {
-    "source_clean": 2_500,
+    # The same bounded budget is reserved and forwarded to Ark. Semantic
+    # cleaning of full evidence batches routinely exceeds the old 2,500 cap.
+    "source_clean": MAX_OUTPUT_TOKENS,
     "summary": 3_500,
     "analysis_step": 4_000,
     "final_part": MAX_OUTPUT_TOKENS,
