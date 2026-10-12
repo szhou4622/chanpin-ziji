@@ -584,10 +584,12 @@ export default function App(): JSX.Element {
   }
 
   const compactLayout = windowWidth < 1240
-  const leftColumn = Math.max(180, Math.min(columns.left, compactLayout ? 220 : 420))
-  const rightColumn = Math.max(340, Math.min(columns.right, compactLayout ? 360 : 620))
-  const middleMin = compactLayout ? 340 : 520
-  const paneTemplate = `${leftColumn}px 6px minmax(${middleMin}px, 1fr) 6px minmax(340px, ${rightColumn}px)`
+  const paneWidth = windowWidth - 32 - 12 // Outer padding and the two resize handles.
+  const middleMin = compactLayout ? 320 : 520
+  const rightMin = compactLayout ? 280 : 340
+  const leftColumn = Math.max(180, Math.min(columns.left, compactLayout ? 220 : 420, paneWidth - middleMin - rightMin))
+  const rightColumn = Math.max(rightMin, Math.min(columns.right, compactLayout ? 360 : 620, paneWidth - leftColumn - middleMin))
+  const paneTemplate = `${leftColumn}px 6px minmax(${middleMin}px, 1fr) 6px ${rightColumn}px`
 
   if (!activationStatus) {
     return (

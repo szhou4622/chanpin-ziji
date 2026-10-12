@@ -18,6 +18,9 @@ export function friendlyError(value: unknown): string {
     return '文件名或保存路径太长。请缩短文件名，或直接保存到桌面。'
   }
   if (/timeout|timed out|超时/i.test(raw)) return '请求超时，请检查网络后重试。'
+  if (/模型输出达到长度上限/u.test(raw)) {
+    return '模型输出达到长度上限，本批内容未完成。其他完成结果已保留；请重试未完成部分，仍失败时联系管理员调整输出额度。'
+  }
   if (/provider_route_unavailable|模型线路连接失败|response stream was interrupted/i.test(raw)) return '模型线路连接失败，请稍后重试。'
   if (/401|unauthorized|invalid api key|authentication/i.test(raw)) return '模型服务授权失败，请联系软件管理员。'
   if (/404|model.*not found|not found.*model/i.test(raw)) return '模型地址或模型名称不正确，请到设置中检查。'

@@ -28,4 +28,10 @@ jobs:
       - run: npm run lint
       - run: npm run test:unit
       - run: npm run test:regression
+      - name: Ark proxy and billing contracts
+        run: python -B -m unittest discover -s ../server-updates/points-proxy-v1 -p "test_*.py"
+      - name: Production V2 billing and adversarial contracts
+        run: python -B -m unittest discover -s ../server-updates/points-proxy-v2 -p "test_*.py"
+      - name: Authorization renewal response contracts
+        run: python -B -m unittest discover -s ../server-updates/authorization-renewal -p "test_*.py"
       - run: npm run build

@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import { app, BrowserWindow } from 'electron'
+import { merchantDesignFixture, cloudDesignFixture } from './fixtures/report-design'
 import {
   buildHtmlReportPresentation,
   markdownToHtmlDocument,
@@ -233,7 +234,8 @@ async function runAudit(): Promise<void> {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true
+      sandbox: true,
+      backgroundThrottling: false
     }
   }))
   window.webContents.on('console-message', (_event, level, message) => {
@@ -497,6 +499,72 @@ async function runAudit(): Promise<void> {
   writeFileSync(scenePrintPath, await window.webContents.printToPDF({ pageSize: 'A4', printBackground: true }))
   const scenePrint = await readPdfAudit(scenePrintPath)
   assert.match(scenePrint.text, /需求场景表.xlsx/u)
+  const merchantAudit: Array<{ name: string; style: string; variant: string; words: number }> = []
+  for (const [name, product, brand, expected] of [
+    ['food', '发酵酸菜', '示例食品', 'household-field-guide'],
+    ['beauty', '补水面霜', '示例美妆', 'restrained-catalogue'],
+    ['home', '记忆棉枕头', '示例家居', 'material-editorial'],
+    ['technology', '无线耳机', '示例数码', 'technical-workbench']
+  ]) {
+    const previewPath = join(outputDir, `merchant-${name}.html`)
+    writeFileSync(previewPath, await markdownToHtmlDocument(merchantDesignFixture(product, brand), cloudDesignFixture(), 'ready'))
+    await window.loadFile(previewPath)
+    for (const width of [320, 375, 414, 768, 1440]) {
+      window.setContentSize(width, 1000)
+      await new Promise(resolveWait => setTimeout(resolveWait, 60))
+      const measured = await window.webContents.executeJavaScript(`(() => {
+        const visible = e => e.getBoundingClientRect().width > 0 && e.getBoundingClientRect().height > 0
+        return { width:innerWidth,scroll:document.documentElement.scrollWidth,
+          style:document.body.dataset.reportStyle,variant:document.body.dataset.brandVariant,
+          words:document.querySelectorAll('.cloud-control').length,
+          panels:[...document.querySelectorAll('.cloud-evidence-panel')].filter(visible).length,
+          clippedWords:[...document.querySelectorAll('.word-cloud__item')].filter(e=>e.getBoundingClientRect().right>innerWidth).length,
+          navClipped:[...document.querySelectorAll('.toc a')].filter(e=>e.scrollWidth>e.clientWidth+1).length }
+      })()`)
+      assert.equal(measured.style, expected)
+      assert.equal(measured.words, 20)
+      assert.equal(measured.panels, 1, 'Only the selected keyword evidence should be visible')
+      assert.ok(measured.scroll <= measured.width + 1, `${name} ${width}px report overflow`)
+      assert.equal(measured.clippedWords, 0)
+      assert.equal(measured.navClipped, 0)
+      if (width === 1440) {
+        merchantAudit.push({ name, style: measured.style, variant: measured.variant, words: measured.words })
+        const contrastFailures = await window.webContents.executeJavaScript(`(() => {
+          const ctx=document.createElement('canvas').getContext('2d',{willReadFrequently:true});ctx.canvas.width=ctx.canvas.height=1
+          const rgb=color=>{ctx.clearRect(0,0,1,1);ctx.fillStyle=color;ctx.fillRect(0,0,1,1);return [...ctx.getImageData(0,0,1,1).data]}
+          const luminance=rgb=>rgb.slice(0,3).map(v=>{v/=255;return v<=.04045?v/12.92:((v+.055)/1.055)**2.4}).reduce((v,c,i)=>v+c*[.2126,.7152,.0722][i],0)
+          return [...document.querySelectorAll('h1,.hero-thesis,.hero-report-label,.visual-note,.toc a,.cloud-axis-note,.cloud-ranking,.cloud-evidence-panel > p')].filter(el=>el.getBoundingClientRect().height>0).flatMap(el=>{
+            const style=getComputedStyle(el);let bg=[255,255,255,255];let parent=el
+            while(parent){const color=rgb(getComputedStyle(parent).backgroundColor);if(color[3]===255){bg=color;break}parent=parent.parentElement}
+            const text=luminance(rgb(style.color)),background=luminance(bg);const ratio=(Math.max(text,background)+.05)/(Math.min(text,background)+.05)
+            const threshold=parseFloat(style.fontSize)>=24||(parseInt(style.fontWeight)>=700&&parseFloat(style.fontSize)>=18)?3:4.5
+            return ratio+0.01<threshold?[{selector:el.className||el.tagName,ratio,threshold}]:[]
+          })
+        })()`)
+        assert.deepEqual(contrastFailures, [], `${name}: text contrast below WCAG threshold`)
+      }
+      await window.webContents.executeJavaScript('window.scrollTo({top:0,behavior:"instant"})')
+      const cover = join(outputDir, `merchant-${name}-${width}.png`)
+      writeFileSync(cover, (await window.webContents.capturePage()).toPNG())
+      captures.push(cover)
+    }
+    await window.webContents.executeJavaScript('document.querySelector(".material-insight-cloud").scrollIntoView({block:"start",behavior:"instant"})')
+    const beforeY = await window.webContents.executeJavaScript('window.scrollY')
+    await window.webContents.executeJavaScript('document.getElementById("cloud-term-7").click()')
+    const selected = await window.webContents.executeJavaScript(`({ visible:getComputedStyle(document.getElementById('cloud-evidence-7')).display !== 'none', oldHidden:getComputedStyle(document.getElementById('cloud-evidence-0')).display === 'none', y:window.scrollY })`)
+    assert.equal(selected.visible, true)
+    assert.equal(selected.oldHidden, true)
+    assert.ok(Math.abs(selected.y - beforeY) < 2, 'Keyword selection must not jump to the page top')
+    await new Promise(resolveWait => setTimeout(resolveWait, 100))
+    const cloud = join(outputDir, `merchant-${name}-cloud.png`)
+    writeFileSync(cloud, (await window.webContents.capturePage()).toPNG())
+    captures.push(cloud)
+    await window.webContents.executeJavaScript('document.getElementById("cloud-term-7").focus()')
+    window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Right' })
+    window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Right' })
+    await new Promise(resolveWait => setTimeout(resolveWait, 50))
+    assert.equal(await window.webContents.executeJavaScript('document.getElementById("cloud-term-8").checked'), true, 'Cloud keyboard navigation failed')
+  }
   window.close()
   activeWindow = null
 
@@ -520,6 +588,7 @@ async function runAudit(): Promise<void> {
         disclosureOpened
       },
       reducedMotionBehavior,
+      merchantAudit,
       printPages: pdfAudit.pageSizes,
       externalRequests: externalRequests.length,
       consoleErrors: errors.length
@@ -527,6 +596,7 @@ async function runAudit(): Promise<void> {
     null,
     2
   )
+  if (keepOutputs) writeFileSync(join(outputDir, 'visual-audit.json'), result)
   process.stdout.write(`${result}\n`)
 }
 

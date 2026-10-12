@@ -1,0 +1,16 @@
+{
+  "balance_unchanged": true,
+  "test_licenses_created_across_harness_attempts": 4,
+  "all_test_licenses_disabled": true,
+  "checked_at_utc": "2026-10-12T18:18:43Z",
+  "created_test_points": 100,
+  "credential_and_binding_unchanged": true,
+  "explicit_recovery_request_passed": true,
+  "invalid_credential_rejected": true,
+  "lost_response_retry_passed": true,
+  "model_calls": 0,
+  "server_code_sha256": "1f6bdfc88357d97a26bbc62deffa9a673bdab3e7295be16dc2e813c03e2d8cdc",
+  "test_authorization_disabled": true,
+  "two_client_renewal_passed": true,
+  "scope": "dedicated test license only; no customer binding or model requests"
+}

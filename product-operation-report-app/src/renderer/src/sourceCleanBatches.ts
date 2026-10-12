@@ -432,9 +432,14 @@ export function missingSourceCleanEvidenceIds(
   if (mode === 'semantic_rows') {
     const receipt = context.coverageReceipt
     if (!receipt || !output.includes(`COVERAGE:${receipt}`)) return receipt ? [receipt] : [...context.evidenceIds]
-    const cited = [...output.matchAll(/POR-R-[A-F0-9]{8}-\d{6}/gu)].map((match) => match[0])
+    // Collect malformed references too: matching only valid six-digit IDs
+    // silently accepts missing citations or ignores bad IDs beside a good one.
+    // Consume the full token so a seven-digit row cannot match a valid prefix.
+    const cited = [...output.matchAll(/POR-R-[A-Z0-9-]*/giu)].map((match) => match[0])
     const allowed = new Set(context.evidenceIds)
-    return cited.some((id) => !allowed.has(id)) ? [receipt] : []
+    return !cited.length || cited.some((id) => !/^POR-R-[A-F0-9]{8}-\d{6}$/u.test(id) || !allowed.has(id))
+      ? [receipt]
+      : []
   }
   if (mode !== 'table_rows') return context.evidenceIds.filter((id) => !output.includes(id))
   if (output.length > 2_048) {

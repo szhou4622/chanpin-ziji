@@ -533,6 +533,7 @@ export interface MaterialSellingPointItem {
 
 export interface MaterialSellingPointInsight {
   version: 1
+  sourceScope?: 'own'
   fingerprint: string
   scopeLabel: string
   totalMaterials: number
@@ -594,6 +595,8 @@ export interface ProjectTaskSnapshot {
   billingLogicalTaskId?: string
   billingOutputSha256?: string
   billingConfirmed?: boolean
+  /** Retain the receipt but exclude obsolete output from current business results. */
+  outputInvalidated?: boolean
   searchStatus?: SearchVerificationStatus
   searchEvidence?: SearchEvidence[]
   updatedAt: string

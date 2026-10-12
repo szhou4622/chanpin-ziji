@@ -182,9 +182,18 @@ async function testProjectRevisionAndBackup(): Promise<void> {
   writeFileSync(join(tempUserData, 'last-project.json.bak'), JSON.stringify(snapshot(5, '更新备份')), 'utf8')
   assert.equal((await loadLastProject())?.revision, 5)
   assert.equal((await loadLastProject())?.reportMarkdown, '更新备份')
-  const billingSnapshot = { ...snapshot(6, 'billing-id'), analysisSessionId: 'stable-billing-session' }
+  const billingSnapshot: SavedProject = {
+    ...snapshot(6, 'billing-id'), analysisSessionId: 'stable-billing-session', taskJournal: {
+      'stable-billing-session:module:v2:product-info': {
+        kind: 'module', status: 'complete', output: 'retained historical output', outputInvalidated: true,
+        billingAttemptId: 'retained-attempt', billingOutputSha256: 'a'.repeat(64), updatedAt: '2026-10-12T00:00:00Z'
+      }
+    }
+  }
   await saveLastProject(billingSnapshot)
   assert.equal((await loadLastProject())?.analysisSessionId, 'stable-billing-session', 'crash recovery preserves stable billing ids')
+  assert.equal((await loadLastProject())?.taskJournal?.['stable-billing-session:module:v2:product-info']?.outputInvalidated, true,
+    'obsolete business output retains its billing proof without becoming reusable after restart')
   const migratedSnapshot: SavedProject = {
     ...snapshot(7, '# 产品内容策略报告'),
     engineVersion: 'v2',
@@ -539,14 +548,15 @@ async function testSavedActivationRecovery(): Promise<void> {
         binding_status: 'active',
         transfer_count: 0,
         machine_code: getDeviceId(),
-        device_credential: 'rotated-recovery-credential',
+        device_credential: 'existing-recovery-credential',
         device_session: 'rotated-recovery-session',
         message: '已有凭证重新验证成功'
       }), { status: 200, headers: { 'content-type': 'application/json' } })
     }) as typeof fetch
     const credentialRecovered = await revalidateSavedActivationCode()
     assert.equal(credentialRecovered.ok, true)
-    assert.equal(recoveryBody.credential_refresh, true)
+    assert.equal(recoveryBody.credential_refresh, undefined, 'saved credentials must not be rotated during revalidation')
+    assert.equal(recoveryBody.device_credential, 'existing-recovery-credential')
     assert.equal(recoveryBody.current_code_id, undefined, 'missing public summary must not invent a code id')
     assert.equal(recoveryBody.confirm_merge, undefined)
     assert.equal(recoveryHeaders.get('authorization'), 'Bearer existing-recovery-session')
@@ -599,7 +609,7 @@ function testSecureVaultBackupAndCorruptionGuard(): void {
   }
 }
 
-async function testSessionRotationAndExpiredRecovery(): Promise<void> {
+async function testSessionRenewalAndExpiredRecovery(): Promise<void> {
   const originalFetch = globalThis.fetch
   const activationFile = join(tempUserData, 'activation.json')
   const activationBackup = `${activationFile}.bak`
@@ -667,10 +677,13 @@ async function testSessionRotationAndExpiredRecovery(): Promise<void> {
     const rotated = await getActivationStatusWithServerCheck()
     assert.equal(rotated.activated, true)
     assert.equal(rotated.authorizationState, 'active')
-    assert.equal(lastActivationBody.credential_refresh, true)
+    assert.equal(lastActivationBody.credential_refresh, undefined, 'ordinary renewal must preserve the long-lived credential')
+    assert.equal(lastActivationBody.device_credential, 'session-lifecycle-credential')
     assert.equal(lastActivationBody.confirm_merge, undefined)
     assert.equal(lastActivationBody.current_code_id, codeId)
     assert.equal(lastActivationHeaders.get('authorization'), `Bearer ${expiringSession}`)
+    assert.equal(lastActivationHeaders.get('x-device-credential'), 'session-lifecycle-credential')
+    assert.equal(inspectLicenseVault().value?.deviceCredential, 'session-lifecycle-credential')
 
     mode = 'expired'
     const expired = await getActivationStatusWithServerCheck()
@@ -689,6 +702,118 @@ async function testSessionRotationAndExpiredRecovery(): Promise<void> {
   } finally {
     globalThis.fetch = originalFetch
     for (const file of [activationFile, activationBackup, licenseVault, licenseVaultBackup]) rmSync(file, { force: true })
+    activationInternals.resetRuntimeValidationForTests()
+  }
+}
+
+async function testSessionRenewalFailureRecovery(): Promise<void> {
+  const originalFetch = globalThis.fetch
+  const activationFile = join(tempUserData, 'activation.json')
+  const vaultFile = join(tempUserData, 'license-vault.bin')
+  const files = [activationFile, `${activationFile}.bak`, vaultFile, `${vaultFile}.bak`]
+  const code = 'STABLE-RENEWAL-FAILURE-TEST'
+  const codeId = 'stable-renewal-primary'
+  const stableCredential = 'stable-renewal-credential'
+  let serverCredential = stableCredential
+  let activated = false
+  let activationCalls = 0
+  let mode: 'normal' | 'lost-response' | 'changed-credential' | 'revoked' | 'unbound' = 'normal'
+  try {
+    for (const file of files) rmSync(file, { force: true })
+    activationInternals.resetRuntimeValidationForTests()
+    const machine = getDeviceId()
+    const oldSession = deviceSessionForTest(codeId, machine, Math.floor(Date.now() / 1000) + 2 * 86400)
+    const validSessions = new Set([oldSession])
+    const response = (fields: Record<string, unknown> = {}, status = 200): Response => new Response(JSON.stringify({
+      ok: status === 200, app_name: 'ProductOperationReport', code_id: codeId,
+      license_type: 'credits', remaining_credits: 88, unlimited: false,
+      binding_status: 'active', transfer_count: 0, machine_code: machine, grant_score: 0,
+      ...fields
+    }), { status, headers: { 'content-type': 'application/json' } })
+    const revoked = (): Response => response({ ok: false, error: '设备凭证已撤销。', error_code: 'device_credential_revoked' }, 401)
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const headers = new Headers(init?.headers)
+      const bearer = headers.get('authorization')?.replace(/^Bearer /u, '')
+      if (String(input).includes('/device/status')) {
+        return bearer && validSessions.has(bearer) && headers.get('x-device-credential') === serverCredential
+          ? response() : revoked()
+      }
+      activationCalls++
+      if (!activated) {
+        activated = true
+        return response({ device_credential: serverCredential, device_session: oldSession, action: 'already_bound' })
+      }
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>
+      // Model the actual server: the old refresh flag rotates the credential
+      // immediately, whereas a supplied existing body credential reuses it.
+      if (bearer && (!validSessions.has(bearer) || headers.get('x-device-credential') !== serverCredential)) return revoked()
+      if (body.credential_refresh) {
+        serverCredential = 'replacement-credential-that-can-be-lost'
+        validSessions.clear()
+      } else if (body.device_credential !== serverCredential) return revoked()
+      if (mode === 'revoked') return revoked()
+      if (mode === 'unbound') return response({ ok: false, error: '授权当前未绑定设备。', error_code: 'device_binding_unbound' }, 401)
+      const renewed = deviceSessionForTest(codeId, machine, Math.floor(Date.now() / 1000) + 30 * 86400 + activationCalls)
+      validSessions.add(renewed)
+      if (mode === 'lost-response') throw new TypeError('simulated lost response after server commit')
+      return response({ device_credential: mode === 'changed-credential' ? 'unexpected-credential' : serverCredential,
+        device_session: renewed, action: 'already_bound' })
+    }) as typeof fetch
+    assert.equal((await activateWithCode(code)).ok, true)
+    const snapshot = files.map(file => [file, readFileSync(file)] as const)
+    const restoreOldClient = (): void => {
+      snapshot.forEach(([file, bytes]) => writeFileSync(file, bytes))
+      activationInternals.resetRuntimeValidationForTests()
+      mode = 'normal'
+    }
+
+    mode = 'lost-response'
+    assert.equal((await getActivationStatusWithServerCheck()).activated, true)
+    assert.equal(serverCredential, stableCredential, 'losing a renewal response must not invalidate the old credential')
+    restoreOldClient()
+    assert.equal((await restoreAuthorizationOnStartup()).activated, true, 'restart recovers without unbinding after a lost response')
+
+    restoreOldClient()
+    assert.equal((await getActivationStatusWithServerCheck()).activated, true)
+    // Simulate a crash/disk failure before the newly issued session is durable.
+    restoreOldClient()
+    assert.equal((await restoreAuthorizationOnStartup()).activated, true, 'pre-save crash leaves the old authorization usable')
+    assert.equal(inspectLicenseVault().value?.deviceCredential, stableCredential)
+
+    restoreOldClient()
+    writeFileSync(vaultFile, 'damaged-primary-file')
+    assert.equal(inspectLicenseVault().source, 'backup')
+    assert.equal((await restoreAuthorizationOnStartup()).activated, true, 'an old readable backup still authenticates after renewal')
+
+    restoreOldClient()
+    mode = 'changed-credential'
+    assert.equal((await getActivationStatusWithServerCheck()).activated, false, 'unexpected credential replacement is rejected')
+    assert.equal(inspectLicenseVault().value?.deviceCredential, stableCredential)
+
+    restoreOldClient()
+    writeLicenseVault({ activationCode: code, licenseId: codeId, machineCode: machine, deviceCredential: stableCredential })
+    const beforeMissingSession = activationCalls
+    assert.equal((await getActivationStatusWithServerCheck()).authorizationState, 'session_expired')
+    assert.equal(activationCalls, beforeMissingSession, 'a missing session must not trigger an automatic rebind')
+    assert.equal((await revalidateSavedActivationCode()).ok, true, 'the user can explicitly restore a missing session')
+
+    for (const failure of ['revoked', 'unbound'] as const) {
+      restoreOldClient()
+      mode = failure
+      const state = await getActivationStatusWithServerCheck()
+      assert.equal(state.activated, false)
+      assert.equal(state.authorizationState, failure === 'revoked' ? 'credential_revoked' : 'unbound')
+      const calls = activationCalls
+      await restoreAuthorizationOnStartup()
+      await getActivationStatusWithServerCheck()
+      if (failure === 'revoked') assert.equal((await revalidateSavedActivationCode()).ok, false)
+      assert.equal(activationCalls, calls, 'authoritative revocation/unbind is not silently reversed')
+    }
+    assert.equal(serverCredential, stableCredential)
+    assert.equal(getDeviceId(), machine)
+  } finally {
+    globalThis.fetch = originalFetch
+    for (const file of files) rmSync(file, { force: true })
     activationInternals.resetRuntimeValidationForTests()
   }
 }
@@ -1146,6 +1271,8 @@ async function testProxyWalletBridge(): Promise<void> {
       }
       if (url.endsWith('/wallet')) {
         assert.equal(new Headers(init?.headers).get('authorization'), `Bearer proxy-token-${sessionCount}`)
+        assert.equal(new Headers(init?.headers).get('x-result-confirmation-capable'), '1',
+          'wallet reads must use the same V2 ledger and pending-settlement retry path as model requests')
         return new Response(JSON.stringify({
           ok: true,
           wallet: {
@@ -1154,7 +1281,7 @@ async function testProxyWalletBridge(): Promise<void> {
             totalTopupPoints: 250,
             totalCostPoints: 49,
             totalChargedPoints: 49,
-            unbilledUsageCount: 0,
+            unbilledUsageCount: 2,
             pricing: {
               model: 'gpt-5.5', currency: 'USD', inputUsdPerMillion: 1.25,
               outputUsdPerMillion: 7.5, cachedInputUsdPerMillion: 0.125,
@@ -1174,12 +1301,16 @@ async function testProxyWalletBridge(): Promise<void> {
     assert.equal((await activateWithCode(code)).ok, true)
     const wallet = await fetchProxyWallet()
     assert.equal(wallet.balancePoints, 201)
+    assert.equal(wallet.totalChargedPoints, 49)
+    assert.equal(wallet.unbilledUsageCount, 2, 'pending V2 settlements survive the wallet bridge')
     assert.equal(wallet.ledger[0]?.description, '资料清洗')
     assert.equal(wallet.ledger[0]?.reportSessionId, 'report-ledger')
 
     globalThis.fetch = (async () => { throw new TypeError('network unavailable') }) as typeof fetch
     const stale = await fetchProxyWallet()
     assert.equal(stale.balancePoints, 201)
+    assert.equal(stale.totalChargedPoints, 49)
+    assert.equal(stale.unbilledUsageCount, 2)
     assert.equal(stale.stale, true)
     assert.match(stale.warning || '', /network unavailable/u)
   } finally {
@@ -2034,18 +2165,18 @@ function testManagedModelIsolation(): void {
   assert.equal(managedModelInternals.parseConfig({ ...validConfig, fallbackModels: ['a', 'b', 'c', 'd'] }).profile, null)
   assert.deepEqual(
     managedModelInternals.parseConfig({ ...validConfig, model: 'gpt-5.5', fallbackModels: undefined }).profiles.map((item) => item.model),
-    ['gpt-5.5', 'claude-sonnet-4-6', 'gemini-3-flash', 'kimi-k2.6']
+    ['gpt-5.5']
   )
   assert.deepEqual(
     managedModelInternals.parseConfig({ ...validConfig, model: 'gpt-5.6-sol', fallbackModels: undefined }).profiles.map((item) => item.model),
-    ['gpt-5.6-sol', 'gpt-5.5', 'claude-sonnet-4-6']
+    ['gpt-5.6-sol']
   )
 
   process.env.PRODUCT_REPORT_MANAGED_MODEL_CONFIG_JSON = JSON.stringify(validConfig)
   assert.equal(getManagedModelState().mode, 'proxy', 'normal development startup must exercise the production proxy path')
   assert.deepEqual(getActiveProfiles().map((item) => item.model),
-    ['gpt-5.6-sol', 'gpt-5.5', 'claude-sonnet-4-6'],
-    'the active proxy route must use Sol, then GPT-5.5, then the retained Claude backup')
+    ['doubao-seed-2-1-pro-260915'],
+    'the active proxy route must use only the configured Ark model')
   assert.notEqual(getActiveProfile()?.apiKey, secret, '开发开关未启用时必须忽略模型环境变量')
   const proxyRendererSettings = loadRendererSettings()
   assert.equal(proxyRendererSettings.profiles.length, 0)
@@ -2247,8 +2378,8 @@ async function testModelFallbackSequence(): Promise<void> {
   const attempts: string[] = []
   assert.deepEqual(
     profilesForTask(profiles, 'module_benchmark').map((item) => item.model),
-    ['gpt-5.6-sol', 'gpt-5.5'],
-    'only M4 receives the dedicated sol to gpt-5.5 sequence'
+    ['gpt-5.6-sol'],
+    'M4 must not inject a different provider model into the configured sequence'
   )
   assert.deepEqual(
     profilesForTask(profiles, 'module_product_info').map((item) => item.model),
@@ -5399,8 +5530,10 @@ async function run(): Promise<void> {
   await testSavedActivationRecovery()
   console.log('Regression: secure vault backup recovery and corruption guard')
   testSecureVaultBackupAndCorruptionGuard()
-  console.log('Regression: proactive session rotation and explicit expired-session recovery')
-  await testSessionRotationAndExpiredRecovery()
+  console.log('Regression: stable-credential session renewal and explicit expired-session recovery')
+  await testSessionRenewalAndExpiredRecovery()
+  console.log('Regression: renewal response loss, restart, old backup, and revocation boundaries')
+  await testSessionRenewalFailureRecovery()
   console.log('Regression: administrator unbind never auto-rebinds on restart')
   await testUnboundNeverAutoRebinds()
   console.log('Regression: activation single-flight and safe diagnostics')

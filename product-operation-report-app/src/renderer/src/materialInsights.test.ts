@@ -5,7 +5,9 @@ import {
   materialInsightFingerprint,
   parseSellingPointDescriptions,
   readMaterialInsightRows,
+  readOwnMaterialInsightRows,
   selectMaterialInsightScope,
+  selectOwnMaterialInsightScope,
   validateSceneSelection
 } from './materialInsights'
 import {
@@ -31,6 +33,61 @@ const sources = [{
 }]
 
 describe('material insight extraction and statistics', () => {
+  it('uses only confirmed own material for cloud inputs, counts and evidence while retaining competitor scenes', () => {
+    const rows = readMaterialInsightRows([
+      { id: 'own', name: '自有.csv', kind: 'table', kindV1: 'material-data', attribution: '自有数据',
+        text: '素材ID,产品,卖点排序,需求场景\na1,产品甲,Top1：安装方便,自有安装场景\na2,产品甲,,缺卖点场景' },
+      { id: 'competitor', name: '竞品.csv', kind: 'table', kindV1: 'material-data', attribution: '竞品数据',
+        text: '素材ID,产品,卖点排序,需求场景\na1,竞品乙,Top1：竞品赠品,竞品收货场景' },
+      { id: 'unknown', name: '未确认.csv', kind: 'table', kindV1: 'material-data',
+        text: '素材ID,产品,卖点排序,需求场景\nx,产品甲,Top1：未确认卖点,未确认场景' }
+    ])
+    const scope = selectOwnMaterialInsightScope(rows, ['产品甲', '竞品乙'])
+    expect(scope.rows.map((row) => row.sourceId)).toEqual(['own', 'own'])
+    expect(scope.selectedProducts).toEqual(['产品甲'])
+    expect(scope.label).toBe('产品甲')
+    expect(buildSceneCatalog(rows).some((scene) => scene.attribution === '竞品数据')).toBe(true)
+    // Passing an unfiltered candidate list cannot reintroduce excluded sources.
+    const candidates = rows.flatMap(parseSellingPointDescriptions).map(({ row, rawDescription, topRank }) => ({
+      sourceId: row.sourceId, sourceName: row.sourceName, sheetName: row.sheetName,
+      rowEvidenceId: row.rowEvidenceId, materialKey: row.materialKey, topRank,
+      rawDescription, evidenceSnippet: rawDescription, candidate: rawDescription
+    }))
+    const insight = computeSellingPointInsight({ rows, scopeLabel: scope.label,
+      fingerprint: materialInsightFingerprint(rows, ['产品甲', '竞品乙']), candidates,
+      normalization: Object.fromEntries(candidates.map((item) => [item.candidate, item.candidate])) })
+    expect(insight).toMatchObject({ sourceScope: 'own', totalMaterials: 2, effectiveMaterials: 1, missingSellingPointMaterials: 1 })
+    expect(insight.items).toHaveLength(1)
+    expect(insight.items[0].coverageRate).toBe(0.5)
+    expect(insight.mappings.every((mapping) => mapping.sourceId === 'own')).toBe(true)
+    expect(insight.items[0].evidence.every((evidence) => evidence.sourceId === 'own')).toBe(true)
+    expect(insight.missingSellingPointRows).toHaveLength(1)
+    expect(materialInsightFingerprint(rows, ['产品甲', '竞品乙']))
+      .toBe(materialInsightFingerprint(scope.rows, scope.selectedProducts))
+    const changedCompetitor = rows.map((row) => row.attribution === '竞品数据' ? { ...row, sellingPoint: '竞品新文案' } : row)
+    expect(materialInsightFingerprint(changedCompetitor, ['产品甲', '竞品乙'])).toBe(insight.fingerprint)
+    expect(selectOwnMaterialInsightScope(rows.filter((row) => row.attribution !== '自有数据'), []).rows).toEqual([])
+    expect(selectOwnMaterialInsightScope(rows, ['竞品乙']).rows).toEqual([])
+  })
+
+  it('ignores competitor parse errors for cloud retries and preserves original source evidence identities', () => {
+    const mixed = [
+      { id: 'competitor', name: '损坏竞品.csv', kind: 'table' as const, kindV1: 'material-data' as const,
+        attribution: '竞品数据', text: '标题,卖点排序\n标题,"未关闭引号' },
+      { id: 'own', name: '自有.csv', kind: 'table' as const, kindV1: 'material-data' as const,
+        attribution: '自有数据', text: '标题,卖点排序\n标题,Top1：安装方便' }
+    ]
+    const allErrors: string[] = []
+    const allRows = readMaterialInsightRows(mixed, allErrors)
+    expect(allErrors).toHaveLength(1)
+    const ownErrors: string[] = []
+    expect(readOwnMaterialInsightRows(mixed, ownErrors)).toEqual(allRows)
+    expect(ownErrors).toEqual([])
+    const invalidOwnErrors: string[] = []
+    readOwnMaterialInsightRows([{ ...mixed[0], attribution: '自有数据' }], invalidOwnErrors)
+    expect(invalidOwnErrors).toHaveLength(1)
+  })
+
   it('reads all sheets, requires explicit scope for multiple products and does not split a phrase on commas', () => {
     const rows = readMaterialInsightRows(sources)
     expect(rows).toHaveLength(4)

@@ -424,6 +424,7 @@ function sanitizeTaskJournal(value: unknown): Record<string, ProjectTaskSnapshot
       billingOutputSha256: typeof raw.billingOutputSha256 === 'string' && /^[0-9a-f]{64}$/.test(raw.billingOutputSha256)
         ? raw.billingOutputSha256 : undefined,
       billingConfirmed: raw.billingConfirmed === true,
+      outputInvalidated: raw.outputInvalidated === true,
       updatedAt: optionalString(raw.updatedAt) || new Date().toISOString()
     }
   }

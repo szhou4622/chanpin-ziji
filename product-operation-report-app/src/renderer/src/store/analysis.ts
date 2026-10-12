@@ -18,6 +18,38 @@ export interface ModelRunResult {
 /** Five extra attempts after the first request, for six-module transient failures only. */
 export const MODULE_TRANSIENT_RETRIES = 5
 
+/** A distinct setter owns one sequential model/retry chain within a concurrent workflow. */
+export function createModelAbortGroup(): {
+  readonly aborted: boolean
+  abort: () => void
+  createSetter: () => (fn: (() => void) | null) => void
+} {
+  const active = new Set<() => void>()
+  let aborted = false
+  return {
+    get aborted() { return aborted },
+    abort: () => {
+      aborted = true
+      for (const abort of [...active]) {
+        active.delete(abort)
+        try { abort() } catch { /* One failed transport cannot prevent the others from stopping. */ }
+      }
+    },
+    createSetter: () => {
+      let current: (() => void) | null = null
+      return (next) => {
+        if (current) active.delete(current)
+        current = next
+        if (!next) return
+        if (aborted) {
+          current = null
+          next()
+        } else active.add(next)
+      }
+    }
+  }
+}
+
 /** Only zero-output transient failures can be retried under the same logical task. */
 export function shouldRetryTransientModelResult(result: ModelRunResult): boolean {
   if (result.ok || result.text.trim()) return false
@@ -62,6 +94,7 @@ export function runModel(
     try {
       const handle = window.api.sendChat(messages, context, {
         onChunk: (delta) => {
+          if (settled) return
           acc += delta
           if (publishTimer === null) {
             publishTimer = window.setTimeout(() => {
@@ -81,8 +114,8 @@ export function runModel(
         }),
         onError: (message) => done({ ok: false, text: acc, error: friendlyError(message), searchStatus, searchEvidence })
       })
-      setAbort(() => {
-        handle.abort()
+      if (!settled) setAbort(() => {
+        try { handle.abort() } catch { /* Still finish locally if transport cleanup fails. */ }
         done({ ok: false, text: acc, error: '已停止', searchStatus, searchEvidence })
       })
     } catch (error) {

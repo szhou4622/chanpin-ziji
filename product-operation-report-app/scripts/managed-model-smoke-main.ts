@@ -13,6 +13,9 @@ async function run(): Promise<void> {
   if (!managed.enabled || !managed.profile || !managed.profiles.length) {
     throw new Error('没有可用的私有内置模型配置。')
   }
+  if (managed.mode !== 'direct-development') {
+    throw new Error('此检查仅支持开发私有配置；不能使用正式代理占位会话测试。')
+  }
   const image = `data:image/png;base64,${readFileSync(join(app.getAppPath(), 'assets', 'product-logo.png')).toString('base64')}`
   let totalLatencyMs = 0
   for (const profile of managed.profiles) {

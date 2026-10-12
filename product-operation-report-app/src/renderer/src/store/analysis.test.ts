@@ -1,10 +1,75 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { MODULE_TRANSIENT_RETRIES, runModelRetry, shouldRetryTransientModelResult } from './analysis'
+import { MODULE_TRANSIENT_RETRIES, createModelAbortGroup, runModel, runModelRetry, shouldRetryTransientModelResult } from './analysis'
 
 afterEach(() => {
   vi.useRealTimers()
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
+})
+
+describe('concurrent model cancellation', () => {
+  const context = {
+    reportSessionId: 'report-stop', taskType: 'module_product_info' as const, taskKey: 'task',
+    billingRequestId: 'task', isVision: false, sourceCount: 1, imageCount: 0, attempt: 1
+  }
+
+  it('stops every remaining stream after another stream completes and releases finished handles', async () => {
+    const callbacks: Array<Parameters<typeof window.api.sendChat>[2]> = []
+    const aborters = [vi.fn(), vi.fn(() => { throw new Error('transport already gone') }), vi.fn()]
+    vi.stubGlobal('window', { setTimeout, clearTimeout, api: {
+      sendChat: (_messages: unknown, _context: unknown, handlers: Parameters<typeof window.api.sendChat>[2]) => {
+        callbacks.push(handlers)
+        return { abort: aborters[callbacks.length - 1] }
+      }
+    } })
+    const group = createModelAbortGroup()
+    const runs = aborters.map(() => runModel([], () => undefined, group.createSetter(), context))
+    callbacks[0].onDone?.('complete')
+    group.abort()
+    const results = await Promise.all(runs)
+    expect(results.map((result) => result.ok)).toEqual([true, false, false])
+    expect(aborters[0]).not.toHaveBeenCalled()
+    expect(aborters[1]).toHaveBeenCalledTimes(1)
+    expect(aborters[2]).toHaveBeenCalledTimes(1)
+    group.abort()
+    expect(aborters[1]).toHaveBeenCalledTimes(1)
+    expect(aborters[2]).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not leave an abort handle when the bridge finishes synchronously', async () => {
+    const abort = vi.fn()
+    const setAbort = vi.fn()
+    vi.stubGlobal('window', { setTimeout, clearTimeout, api: {
+      sendChat: (_messages: unknown, _context: unknown, handlers: Parameters<typeof window.api.sendChat>[2]) => {
+        handlers.onDone?.('complete')
+        return { abort }
+      }
+    } })
+    expect((await runModel([], () => undefined, setAbort, context)).ok).toBe(true)
+    expect(setAbort).toHaveBeenLastCalledWith(null)
+    expect(setAbort).toHaveBeenCalledTimes(1)
+  })
+
+  it('cancels another task retry backoff after a concurrent stream completes', async () => {
+    vi.useFakeTimers()
+    const callbacks: Array<Parameters<typeof window.api.sendChat>[2]> = []
+    const sendChat = vi.fn((_messages: unknown, _context: unknown, handlers: Parameters<typeof window.api.sendChat>[2]) => {
+      callbacks.push(handlers)
+      return { abort: () => undefined }
+    })
+    vi.stubGlobal('window', { setTimeout, clearTimeout, api: { sendChat } })
+    const group = createModelAbortGroup()
+    const retry = runModelRetry([], () => undefined, group.createSetter(), undefined, 5, context)
+    const other = runModel([], () => undefined, group.createSetter(), context)
+    callbacks[0].onError?.('provider_route_unavailable')
+    await Promise.resolve()
+    callbacks[1].onDone?.('complete')
+    group.abort()
+    await vi.runAllTimersAsync()
+    expect((await retry).error).toBe('已停止')
+    expect((await other).ok).toBe(true)
+    expect(sendChat).toHaveBeenCalledTimes(2)
+  })
 })
 
 describe('six-module transient retry policy', () => {

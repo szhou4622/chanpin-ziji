@@ -16,6 +16,7 @@ import type {
   SourceKindV1,
   ModuleKey,
   ModuleRunState,
+  MaterialSellingPointInsight,
   ReportEngineVersion
 } from '../../shared/types'
 import { REPORT_MODULES, REPORT_MODULES_V2, SOP_STEPS } from '../../shared/types'
@@ -33,8 +34,8 @@ import {
 import { validateReportEvidenceLinks, validateReportStructure } from './validate'
 import { friendlyError } from './store/errors'
 import { buildProjectSnapshot } from './store/persistence'
-import { MODULE_TRANSIENT_RETRIES, mergeRevisionParts, runFinalReportInParts, runModelRetry, selectRevisionParts } from './store/analysis'
-import { billingProof, confirmSavedResult, rejectIncompleteResult } from './store/billing'
+import { MODULE_TRANSIENT_RETRIES, createModelAbortGroup, mergeRevisionParts, runFinalReportInParts, runModelRetry, selectRevisionParts } from './store/analysis'
+import { billingProof, confirmSavedResult, confirmSavedTask, needsSavedResultConfirmation, rejectIncompleteResult } from './store/billing'
 import { isTemporaryReservationContention, planCleaningConcurrency } from './store/cleaning'
 import {
   buildCleaningPlan,
@@ -58,7 +59,7 @@ import {
   validateModuleOutput
 } from './modules'
 import { inferSourcePlatform } from './sourceMetadata'
-import { buildSceneCatalog, materialInsightFingerprint, readMaterialInsightRows, selectMaterialInsightScope, validateSceneSelection } from './materialInsights'
+import { buildSceneCatalog, computeSellingPointInsight, materialInsightFingerprint, readMaterialInsightRows, readOwnMaterialInsightRows, selectMaterialInsightScope, selectOwnMaterialInsightScope, validateSceneSelection } from './materialInsights'
 import { materialInsightTaskPrefix, readMaterialInsightResult, runMaterialInsightWorkflow } from './materialInsightWorkflow'
 
 export { friendlyError } from './store/errors'
@@ -272,9 +273,25 @@ function hasCompleteReportSections(markdown: string): boolean {
   return legacy || v1 || v2
 }
 
-function validReportCacheSnapshot(snapshot: ReportResultCacheSnapshot | undefined): snapshot is ReportResultCacheSnapshot {
+function compatibleCachedInsight(snapshot: ReportResultCacheSnapshot, state: Pick<StoreState, 'sources' | 'selectedMaterialProducts'>): MaterialSellingPointInsight | null {
+  const insight = snapshot.materialInsight
+  if (insight?.version === 1 && insight.sourceScope === 'own') return insight
+  // Empty legacy clouds carry no competitor content. Rebuild their own-material
+  // denominator locally when there is no selling-point input to send to a model.
+  if (insight && (insight.version !== 1 || insight.totalMaterials !== 0 || insight.effectiveMaterials !== 0 ||
+    insight.normalizedCount !== 0 || insight.items.length !== 0 || insight.mappings.length !== 0)) return null
+  const errors: string[] = []
+  const rows = readOwnMaterialInsightRows(state.sources, errors)
+  if (errors.length || rows.some((row) => row.sellingPoint.trim())) return null
+  const scope = selectOwnMaterialInsightScope(rows, state.selectedMaterialProducts)
+  if (scope.needsSelection) return null
+  return computeSellingPointInsight({ rows: scope.rows, scopeLabel: scope.label,
+    fingerprint: materialInsightFingerprint(scope.rows, scope.selectedProducts), candidates: [], normalization: {} })
+}
+
+function validReportCacheSnapshot(snapshot: ReportResultCacheSnapshot | undefined, state: Pick<StoreState, 'sources' | 'selectedMaterialProducts'>): snapshot is ReportResultCacheSnapshot {
   if (!snapshot?.cleanedData.trim() || !snapshot.reportMarkdown.trim()) return false
-  if (!snapshot.materialInsight || snapshot.materialInsight.version !== 1) return false
+  if (!compatibleCachedInsight(snapshot, state)) return false
   if (!hasCompleteReportSections(snapshot.reportMarkdown)) return false
   return REPORT_MODULES.every((module) => snapshot.artifacts[module.id]?.trim()) && Boolean(snapshot.artifacts[REPORT_STEP_ID]?.trim())
 }
@@ -288,7 +305,7 @@ function snapshotForReportCache(state: StoreState): ReportResultCacheSnapshot | 
     return detail ? [{ name: source.name, text: detail.text }] : []
   })
   if (cleanDetails.length !== state.sources.filter(sourceHasContent).length) return null
-  const scope = selectMaterialInsightScope(readMaterialInsightRows(state.sources), state.selectedMaterialProducts)
+  const scope = selectOwnMaterialInsightScope(readMaterialInsightRows(state.sources), state.selectedMaterialProducts)
   if (scope.needsSelection) return null
   const insight = readMaterialInsightResult(state.taskJournal, state.analysisSessionId,
     materialInsightFingerprint(scope.rows, scope.selectedProducts))
@@ -816,19 +833,36 @@ interface StoreState {
   _rerunReport: (latestFeedback?: string) => Promise<void>
 }
 
-const invalidatedAnalysis = (): Pick<
+const invalidatedAnalysis = (state: StoreState): Pick<
   StoreState,
-  'cleanedData' | 'phase' | 'abortFn' | 'exportStatus' | 'cleaningProgress' | 'reportReuseOffer' | 'taskJournal' | 'moduleStates'
-> => ({
-  cleanedData: '',
-  phase: 'idle',
-  abortFn: null,
-  exportStatus: '',
-  cleaningProgress: emptyCleaningProgress(),
-  reportReuseOffer: null,
-  taskJournal: {},
-  moduleStates: {}
-})
+  'cleanedData' | 'phase' | 'abortFn' | 'exportStatus' | 'cleaningProgress' | 'reportReuseOffer' | 'taskJournal' | 'moduleStates' |
+  'analysisSessionId' | 'projectRevision' | 'moduleRetryInstructions' | 'moduleRetryScope'
+> => {
+  state.abortFn?.()
+  const hasCurrentResults = Object.keys(state.taskJournal).some((id) => id.startsWith(`${state.analysisSessionId}:`)) ||
+    !state.reportStale && Object.keys(state.artifacts).length > 0
+  // Local parsing has no paid task IDs yet; preserve its epoch while users edit
+  // metadata so pending file reads can still attach to their existing source IDs.
+  const preserveParsingSession = state.sources.some((source) => source.parsing) && !hasCurrentResults
+  return {
+    cleanedData: '',
+    phase: 'idle',
+    abortFn: null,
+    exportStatus: '',
+    cleaningProgress: emptyCleaningProgress(),
+    reportReuseOffer: null,
+    // Changed business inputs need a new namespace. Keep historical receipts in
+    // the same durable snapshot so the main process can verify their original IDs.
+    analysisSessionId: preserveParsingSession ? state.analysisSessionId : crypto.randomUUID(),
+    projectRevision: state.projectRevision + 1,
+    taskJournal: Object.fromEntries(Object.entries(state.taskJournal).flatMap(([id, task]) =>
+      task.status === 'complete' && task.output?.trim() && task.billingAttemptId && task.billingOutputSha256
+        ? [[id, { ...task, billingLogicalTaskId: task.billingLogicalTaskId || id, outputInvalidated: true }]] : [])),
+    moduleStates: {},
+    moduleRetryInstructions: {},
+    moduleRetryScope: []
+  }
+}
 
 const preserveCommittedReport = (
   state: StoreState
@@ -839,6 +873,37 @@ const preserveCommittedReport = (
     reportMarkdown: committed,
     reportStale: Boolean(committed)
   }
+}
+
+async function recoverHistoricalBillingResults(
+  getState: () => StoreState,
+  saveTask: (id: string, task: ProjectTaskSnapshot) => void
+): Promise<boolean> {
+  const sessionId = getState().analysisSessionId
+  const current = (): boolean => getState().analysisSessionId === sessionId
+  const pending = Object.entries(getState().taskJournal).filter(([id, task]) =>
+    !id.startsWith(`${sessionId}:`) && needsSavedResultConfirmation(task))
+  for (const [id, task] of pending) {
+    if (!current()) return false
+    try {
+      await window.api.saveLastProject(buildProjectSnapshot(getState()))
+      if (!current()) return false
+      const receipt = await confirmSavedTask(id, task)
+      if (!current()) return false
+      if (receipt.state !== 'charged') throw new Error('之前结果的积分仍待确认。')
+      saveTask(id, { ...task, billingConfirmed: true })
+      try {
+        await window.api.saveLastProject(buildProjectSnapshot(getState()))
+      } catch (error) {
+        if (current()) saveTask(id, task)
+        throw error
+      }
+    } catch (error) {
+      if (current()) getState()._post('assistant', `之前已保存结果的积分确认尚未完成：${friendlyError(error)} 请稍后重试，新资料尚未调用模型。`, 'error')
+      return false
+    }
+  }
+  return current()
 }
 
 export const useStore = create<StoreState>((set, get) => ({
@@ -922,9 +987,20 @@ export const useStore = create<StoreState>((set, get) => ({
     } else if (lastProject?.engineVersion === 'v2') {
       for (const module of REPORT_MODULES_V2) {
         const taskEntry = Object.entries(restoredTaskJournal).find(([taskId]) =>
-          taskId.endsWith(`:module:v2:${module.key}`)
+          lastProject.analysisSessionId
+            ? taskId === `${lastProject.analysisSessionId}:module:v2:${module.key}`
+            : taskId.endsWith(`:module:v2:${module.key}`)
         )
         let task = taskEntry?.[1]
+        if (task?.outputInvalidated) {
+          delete restoredArtifacts[module.id]
+          restoredModuleStates[module.key] = {
+            status: 'failed', message: '旧结果已失效，请重试重新分析；原始扣费凭据已保留。',
+            updatedAt: task.updatedAt
+          }
+          invalidCompletedModules.push(module.key)
+          continue
+        }
         if (module.key === 'material-review' && task?.output) {
           const normalized = normalizeMaterialReviewOutput(task.output)
           if (normalized !== task.output) {
@@ -940,7 +1016,9 @@ export const useStore = create<StoreState>((set, get) => ({
           validateModuleOutput(module.key, task.output, 'v2').length > 0
         ) {
           delete restoredArtifacts[module.id]
-          delete restoredTaskJournal[taskEntry![0]]
+          if (task.status === 'complete' && task.billingAttemptId && task.billingOutputSha256) {
+            restoredTaskJournal[taskEntry![0]] = { ...task, outputInvalidated: true }
+          } else delete restoredTaskJournal[taskEntry![0]]
           restoredModuleStates[module.key] = {
             status: 'failed',
             message: `旧结果不完整：${validateModuleOutput(module.key, task.output, 'v2').slice(0, 3).join('；')}。`,
@@ -985,7 +1063,11 @@ export const useStore = create<StoreState>((set, get) => ({
           updatedAt: new Date().toISOString()
         }
         for (const taskId of Object.keys(restoredTaskJournal)) {
-          if (taskId.includes(`:module:v2:${key}`)) delete restoredTaskJournal[taskId]
+          if (!taskId.includes(`:module:v2:${key}`)) continue
+          const task = restoredTaskJournal[taskId]
+          if (task.status === 'complete' && task.billingAttemptId && task.billingOutputSha256) {
+            restoredTaskJournal[taskId] = { ...task, outputInvalidated: true }
+          } else delete restoredTaskJournal[taskId]
         }
       }
       let foundBlocked = true
@@ -1156,16 +1238,13 @@ export const useStore = create<StoreState>((set, get) => ({
     // not re-run a completed model task. Retry the receipt using only IDs and
     // hashes already retained with the recoverable project snapshot.
     let confirmedAfterRestore = false
+    if (Object.values(restoredTaskJournal).some(needsSavedResultConfirmation)) {
+      await window.api.saveLastProject(buildProjectSnapshot(get()))
+    }
     for (const [taskId, task] of Object.entries(restoredTaskJournal)) {
-      if (task.status !== 'complete' || !task.output?.trim() || task.billingConfirmed ||
-          !task.billingAttemptId || !task.billingOutputSha256) continue
+      if (!needsSavedResultConfirmation(task)) continue
       try {
-        const logicalId = task.billingLogicalTaskId || taskId
-        const result = await confirmSavedResult(logicalId, {
-          ok: true, text: task.output,
-          requestId: task.billingAttemptId,
-          outputSha256: task.billingOutputSha256
-        }, task.output)
+        const result = await confirmSavedTask(taskId, task)
         if (result.state === 'charged') {
           restoredTaskJournal[taskId] = { ...task, billingConfirmed: true }
           confirmedAfterRestore = true
@@ -1431,7 +1510,7 @@ export const useStore = create<StoreState>((set, get) => ({
   _update: (id, text) => set((s) => ({ messages: s.messages.map((m) => (m.id === id ? { ...m, text } : m)) })),
 
   addSources: async (files) => {
-    const sessionId = get().analysisSessionId
+    let sessionId = get().analysisSessionId
     if (isRunningPhase(get().phase)) return
     if (get().sources.some((source) => source.parsing)) {
       get()._post('assistant', '正在读取上一批资料，请等“解析中”全部结束后再继续添加。', 'narration')
@@ -1546,7 +1625,7 @@ export const useStore = create<StoreState>((set, get) => ({
     set((s) => {
       if (s.analysisSessionId !== sessionId || isRunningPhase(s.phase)) return s
       return {
-        ...invalidatedAnalysis(),
+        ...invalidatedAnalysis(s),
         ...preserveCommittedReport(s),
         sources: [
           ...s.sources,
@@ -1566,6 +1645,7 @@ export const useStore = create<StoreState>((set, get) => ({
         ]
       }
     })
+    sessionId = get().analysisSessionId
 
     let next = 0
     const worker = async (): Promise<void> => {
@@ -1741,7 +1821,7 @@ export const useStore = create<StoreState>((set, get) => ({
     set((s) => {
       if (isRunningPhase(s.phase) || !s.sources.some((source) => source.id === id)) return s
       return {
-        ...invalidatedAnalysis(),
+        ...invalidatedAnalysis(s),
         ...preserveCommittedReport(s),
         sources: s.sources.filter((source) => source.id !== id),
         selectedMaterialProducts: [],
@@ -1754,7 +1834,7 @@ export const useStore = create<StoreState>((set, get) => ({
       isRunningPhase(s.phase)
         ? s
         : {
-            ...invalidatedAnalysis(),
+            ...invalidatedAnalysis(s),
             ...preserveCommittedReport(s),
             sources: s.sources.map((x) => (x.id === id ? { ...x, attribution } : x)),
             cleanDetails: s.cleanDetails.filter((d) => d.id !== id)
@@ -1771,7 +1851,7 @@ export const useStore = create<StoreState>((set, get) => ({
       )
       if (!changedIds.size) return s
       return {
-        ...invalidatedAnalysis(),
+        ...invalidatedAnalysis(s),
         ...preserveCommittedReport(s),
         sources: s.sources.map((source) =>
           changedIds.has(source.id) ? { ...source, attribution } : source
@@ -1785,7 +1865,7 @@ export const useStore = create<StoreState>((set, get) => ({
       isRunningPhase(s.phase)
         ? s
         : {
-            ...invalidatedAnalysis(),
+            ...invalidatedAnalysis(s),
             ...preserveCommittedReport(s),
             sources: s.sources.map((x) => (x.id === id ? { ...x, platform } : x)),
             cleanDetails: s.cleanDetails.filter((d) => d.id !== id)
@@ -1797,7 +1877,7 @@ export const useStore = create<StoreState>((set, get) => ({
       isRunningPhase(s.phase)
         ? s
         : {
-            ...invalidatedAnalysis(),
+            ...invalidatedAnalysis(s),
             ...preserveCommittedReport(s),
             sources: s.sources.map((x) => (x.id === id ? { ...x, purpose } : x)),
             cleanDetails: s.cleanDetails.filter((d) => d.id !== id)
@@ -1809,7 +1889,7 @@ export const useStore = create<StoreState>((set, get) => ({
       isRunningPhase(s.phase)
         ? s
         : {
-            ...invalidatedAnalysis(),
+            ...invalidatedAnalysis(s),
             ...preserveCommittedReport(s),
             sources: s.sources.map((source) => (source.id === id ? { ...source, kindV1 } : source)),
             selectedMaterialProducts: [],
@@ -1823,7 +1903,7 @@ export const useStore = create<StoreState>((set, get) => ({
       isRunningPhase(s.phase)
         ? s
         : {
-            ...invalidatedAnalysis(),
+            ...invalidatedAnalysis(s),
             ...preserveCommittedReport(s),
             sources: s.sources.map((x) => (x.id === id ? { ...x, note } : x)),
             cleanDetails: s.cleanDetails.filter((d) => d.id !== id)
@@ -1832,9 +1912,11 @@ export const useStore = create<StoreState>((set, get) => ({
 
   setSourceProductName: (id, productName) =>
     set((s) => isRunningPhase(s.phase) ? s : {
+      ...invalidatedAnalysis(s),
       ...preserveCommittedReport(s),
       sources: s.sources.map((source) => source.id === id ? { ...source, productName: productName.trim() } : source),
       selectedMaterialProducts: [],
+      cleanedData: s.cleanedData,
       phase: s.cleanedData ? 'checkpoint1' as Phase : 'idle' as Phase,
       moduleStates: {},
       reportReuseOffer: null
@@ -1846,8 +1928,10 @@ export const useStore = create<StoreState>((set, get) => ({
       const selectedMaterialProducts = [...new Set(products.map((value) => value.trim()).filter(Boolean))]
       if (JSON.stringify(selectedMaterialProducts) === JSON.stringify(s.selectedMaterialProducts)) return s
       return {
+        ...invalidatedAnalysis(s),
         ...preserveCommittedReport(s),
         selectedMaterialProducts,
+        cleanedData: s.cleanedData,
         phase: s.cleanedData ? 'checkpoint1' as Phase : 'idle' as Phase,
         moduleStates: {},
         reportReuseOffer: null
@@ -1919,7 +2003,7 @@ export const useStore = create<StoreState>((set, get) => ({
     }
     try {
       const cached = await window.api.lookupReportResultCache(reportResultCacheInput(sources, get().steering, get().selectedMaterialProducts))
-      if (cached.hit && validReportCacheSnapshot(cached.snapshot)) {
+      if (cached.hit && validReportCacheSnapshot(cached.snapshot, get())) {
         set({ reportReuseOffer: cached })
         return
       }
@@ -1931,7 +2015,7 @@ export const useStore = create<StoreState>((set, get) => ({
 
   acceptReportReuse: async () => {
     const offer = get().reportReuseOffer
-    if (!offer || !validReportCacheSnapshot(offer.snapshot)) {
+    if (!offer || !validReportCacheSnapshot(offer.snapshot, get())) {
       set({ reportReuseOffer: null })
       get()._post('assistant', '上次报告缓存已失效，将按正常流程重新生成。', 'narration')
       await get()._startPaidGeneration()
@@ -1948,7 +2032,7 @@ export const useStore = create<StoreState>((set, get) => ({
       return
     }
     const sessionId = get().analysisSessionId
-    const cachedInsight = offer.snapshot.materialInsight!
+    const cachedInsight = compatibleCachedInsight(offer.snapshot, get())!
     const insightTaskId = `${materialInsightTaskPrefix(sessionId, cachedInsight.fingerprint)}:final`
     set({
       reportReuseOffer: null,
@@ -2049,6 +2133,11 @@ export const useStore = create<StoreState>((set, get) => ({
     const sessionId = get().analysisSessionId
     const isCurrentSession = (): boolean => get().analysisSessionId === sessionId
     set({ phase: 'cleaning', cleanedData: '' })
+    if (!await recoverHistoricalBillingResults(get, (id, task) =>
+      set((state) => ({ taskJournal: { ...state.taskJournal, [id]: task } })))) {
+      if (isCurrentSession()) set({ phase: 'idle', abortFn: null })
+      return
+    }
     const usable = get().sources.filter(sourceHasContent)
     const sourceCount = usable.length
     const imageCount = sourceImageCount(usable)
@@ -2107,12 +2196,12 @@ export const useStore = create<StoreState>((set, get) => ({
         )
       }
 
-      const aborts = new Set<() => void>()
+      const aborts = createModelAbortGroup()
       let cancelled = false
       let pauseAfterFailure = false
       let activeVisionSources = 0
       const failures: Array<{ name: string; error: string }> = []
-      set({ abortFn: () => { cancelled = true; aborts.forEach((fn) => fn()) } })
+      set({ abortFn: () => { cancelled = true; aborts.abort() } })
 
       let next = 0
       const worker = async (): Promise<void> => {
@@ -2328,6 +2417,17 @@ export const useStore = create<StoreState>((set, get) => ({
                 const batchTaskId = `${sessionId}:source_clean:${s.id}:batch-v7-planned:${batch.context.batchIndex}`
                 const savedBatch = get().taskJournal[batchTaskId]
                 if (savedBatch?.status === 'complete' && savedBatch.output?.trim()) {
+                  if (needsSavedResultConfirmation(savedBatch)) {
+                    await window.api.saveLastProject(buildProjectSnapshot(get()))
+                    const billingResult = await confirmSavedTask(batchTaskId, savedBatch)
+                    if (!isCurrentSession()) return
+                    if (billingResult.state === 'charged') {
+                      set((state) => ({ taskJournal: {
+                        ...state.taskJournal, [batchTaskId]: { ...savedBatch, billingConfirmed: true }
+                      } }))
+                      await window.api.saveLastProject(buildProjectSnapshot(get()))
+                    }
+                  }
                   batchOutputs[batchPosition] = savedBatch.output
                   set((state) => ({
                     cleaningProgress: {
@@ -2351,9 +2451,7 @@ export const useStore = create<StoreState>((set, get) => ({
                   () => runModelRetry(
                     buildExtractMessages(batch.source, batch.context),
                     () => {},
-                    (fn) => {
-                      if (fn) aborts.add(fn)
-                    },
+                    aborts.createSetter(),
                     undefined,
                     1,
                     {
@@ -2384,17 +2482,24 @@ export const useStore = create<StoreState>((set, get) => ({
                   await rejectIncompleteResult(batchTaskId, res)
                   get()._post(
                     'assistant',
-                    `「${s.name}」第 ${batch.context.batchIndex} 批漏了 ${missingEvidence.length} 个证据单元，正在只补做这一批……`,
+                    `「${s.name}」第 ${batch.context.batchIndex} 批的引用未能完整对应原资料，正在只补做这一批……`,
                     'narration'
                   )
                   const repair = await runWithReservationBackpressure(
                     `「${s.name}」第 ${batch.context.batchIndex} 批补做`,
                     () => runModelRetry(
-                      buildExtractMessages(batch.source, batch.context),
+                      [
+                        ...buildExtractMessages(batch.source, batch.context),
+                        {
+                          role: 'user',
+                          content: '上次结果的证据引用或完整性回执未通过校验，请重新输出本批完整结果。' +
+                            '每个引用必须单独完整照抄原证据ID，保留全部前导0；禁止缩写前缀、简写编号、编造ID或用范围替代。' +
+                            (batch.context.evidenceIds[0] ? `本批合法ID格式示例：${batch.context.evidenceIds[0]}。` : '') +
+                            (batch.context.coverageReceipt ? `最后一行必须原样输出：COVERAGE:${batch.context.coverageReceipt}` : '')
+                        }
+                      ],
                       () => {},
-                      (fn) => {
-                        if (fn) aborts.add(fn)
-                      },
+                      aborts.createSetter(),
                       undefined,
                       0,
                       {
@@ -2412,7 +2517,7 @@ export const useStore = create<StoreState>((set, get) => ({
                   )
                   if (!repair.ok || missingSourceCleanEvidenceIds(batch.context, repair.text, batch.context.mode).length) {
                     if (repair.ok) await rejectIncompleteResult(batchTaskId, repair)
-                    markSourceFailure(`第 ${batch.context.batchIndex}/${batch.context.batchCount} 批仍有证据未覆盖，已停止该文件，避免漏资料。`)
+                    markSourceFailure(`第 ${batch.context.batchIndex}/${batch.context.batchCount} 批的引用仍未通过核验，已停止该文件，避免使用无法对应原资料的结果。`)
                     continue
                   }
                   verifiedText = repair.text
@@ -2455,7 +2560,9 @@ export const useStore = create<StoreState>((set, get) => ({
                 }
               }
             }
-            await Promise.all(Array.from({ length: perSourceBatchConcurrency }, () => batchWorker()))
+            const batchResults = await Promise.allSettled(Array.from({ length: perSourceBatchConcurrency }, () => batchWorker()))
+            const failedBatch = batchResults.find((result) => result.status === 'rejected')
+            if (failedBatch?.status === 'rejected') throw failedBatch.reason
             if (!isCurrentSession()) return
             if (
               sourceFailed ||
@@ -2572,6 +2679,11 @@ export const useStore = create<StoreState>((set, get) => ({
     const sessionId = get().analysisSessionId
     const isCurrentSession = (): boolean => get().analysisSessionId === sessionId
     set({ phase: 'analyzing' })
+    if (!await recoverHistoricalBillingResults(get, (id, task) =>
+      set((state) => ({ taskJournal: { ...state.taskJournal, [id]: task } })))) {
+      if (isCurrentSession()) set({ phase: 'checkpoint1', abortFn: null })
+      return
+    }
     const detailsById = new Map(get().cleanDetails.map((detail) => [detail.id, detail.text]))
     const analysisSources = get().sources.map((source) => ({
       ...source,
@@ -2590,6 +2702,9 @@ export const useStore = create<StoreState>((set, get) => ({
     }
     const sceneRows = materialRows.filter((row) => materialScope.selectedProducts.includes(row.product) || /竞品|竞对/u.test(row.attribution))
     const sceneCatalog = materialScanErrors.length ? [] : buildSceneCatalog(sceneRows)
+    const ownMaterialScanErrors: string[] = []
+    readOwnMaterialInsightRows(analysisSources, ownMaterialScanErrors)
+    const ownMaterialScope = selectOwnMaterialInsightScope(materialRows, get().selectedMaterialProducts)
     const sufficiency = evaluateSourceSufficiency(REPORT_MODULES, analysisSources.map((source) => source.kindV1))
     if (sufficiency.blocked) {
       set({ phase: 'checkpoint1', abortFn: null })
@@ -2603,8 +2718,54 @@ export const useStore = create<StoreState>((set, get) => ({
       set((current) => ({ moduleStates: { ...current.moduleStates, [key]: state } }))
     }
     const moduleByKey = new Map(REPORT_MODULES.map((module) => [module.key, module]))
+    const aborts = createModelAbortGroup()
+    set({ abortFn: aborts.abort })
+    const confirmModuleTask = async (taskId: string, task: ProjectTaskSnapshot): Promise<boolean> => {
+      if (!isCurrentSession()) return false
+      // Re-save on an in-session retry as the first save may have failed before acknowledgement.
+      await window.api.saveLastProject(buildProjectSnapshot(get()))
+      if (!isCurrentSession()) return false
+      const result = await confirmSavedTask(taskId, task)
+      if (result.state === 'charged' && isCurrentSession()) {
+        set((state) => ({ taskJournal: {
+          ...state.taskJournal,
+          [taskId]: { ...task, billingConfirmed: true }
+        } }))
+        try {
+          await window.api.saveLastProject(buildProjectSnapshot(get()))
+        } catch (error) {
+          // An unpersisted receipt acknowledgement must still take the recovery
+          // path, never turn a retry into an explicitly billed regeneration.
+          if (isCurrentSession()) set((state) => ({ taskJournal: {
+            ...state.taskJournal, [taskId]: task
+          } }))
+          throw error
+        }
+      }
+      return result.state === 'charged'
+    }
     const runModule = async (module: typeof REPORT_MODULES[number]): Promise<void> => {
-      if (!isCurrentSession()) return
+      if (!isCurrentSession() || aborts.aborted) return
+      const setModuleAbort = aborts.createSetter()
+      const savedTaskId = `${sessionId}:module:v2:${module.key}`
+      let saved = get().taskJournal[savedTaskId]
+      if (saved && needsSavedResultConfirmation(saved)) {
+        // An ambiguous confirmation must never submit a second provider request,
+        // even when the retry includes changed instructions or prompt inputs.
+        const retainedOutput = saved.output!
+        if (!saved.outputInvalidated) set((state) => ({ artifacts: { ...state.artifacts, [module.id]: retainedOutput } }))
+        const confirmed = await confirmModuleTask(savedTaskId, saved)
+        if (!isCurrentSession()) return
+        if (!saved.outputInvalidated) {
+          updateModuleState(module.key, { status: 'done', updatedAt: saved.updatedAt })
+          return
+        }
+        if (!confirmed) {
+          updateModuleState(module.key, { status: 'failed', message: '旧结果的积分确认尚未完成，请稍后重试；旧内容未用于本次报告。', updatedAt: saved.updatedAt })
+          return
+        }
+        saved = get().taskJournal[savedTaskId]
+      }
       const failedDependencies = failedModuleDependencies(module, get().moduleStates)
       if (failedDependencies.length) {
         updateModuleState(module.key, {
@@ -2627,9 +2788,7 @@ export const useStore = create<StoreState>((set, get) => ({
         })
         return
       }
-      const savedTaskId = `${sessionId}:module:v2:${module.key}`
-      const saved = get().taskJournal[savedTaskId]
-      const explicitRedo = get().moduleRetryScope.includes(module.key) &&
+      const explicitRedo = (get().moduleRetryScope.includes(module.key) || saved?.outputInvalidated === true) &&
         saved?.status === 'complete' && (saved.billingConfirmed === true || !saved.billingAttemptId)
       const priorBillingId = saved?.billingLogicalTaskId || savedTaskId
       const billingLogicalId = explicitRedo
@@ -2667,6 +2826,7 @@ export const useStore = create<StoreState>((set, get) => ({
       }
       updateModuleState(module.key, { status: 'running', updatedAt: new Date().toISOString() })
       const prompt = await window.api.getModulePrompt(module.key)
+      if (!isCurrentSession() || aborts.aborted) return
       const missingDependencies = [
         ...module.dependsOn.flatMap((key) => {
         const dependency = moduleByKey.get(key)
@@ -2683,7 +2843,7 @@ export const useStore = create<StoreState>((set, get) => ({
         sceneCatalog: module.key === 'audience-sp-scene' ? sceneCatalog : undefined
       })
       const inputFingerprint = fingerprintModuleMessages(messages, 'v2')
-      const reusableInput = !explicitRedo && (outsideTargetedRetry || saved?.inputFingerprint === inputFingerprint)
+      const reusableInput = !explicitRedo && !saved?.outputInvalidated && (outsideTargetedRetry || saved?.inputFingerprint === inputFingerprint)
       if (reusableInput && saved?.output?.trim() && isNoAnalysisOutput(saved.output)) {
         const output = normalizeNoAnalysisOutput(saved.output)
         updateModuleState(module.key, { status: 'skipped', message: output, updatedAt: saved.updatedAt })
@@ -2716,9 +2876,7 @@ export const useStore = create<StoreState>((set, get) => ({
       let result = await runModelRetry(
         messages,
         () => {},
-        (fn) => {
-          if (isCurrentSession()) set({ abortFn: fn })
-        },
+        setModuleAbort,
         (attempt) => {
           if (isCurrentSession()) get()._post('assistant', `M${module.id} ${module.title}连接中断，正在自动重试（${attempt}/${MODULE_TRANSIENT_RETRIES}）…`, 'narration')
         },
@@ -2754,7 +2912,8 @@ export const useStore = create<StoreState>((set, get) => ({
       if (validationErrors.length && !isNoAnalysisOutput(moduleOutput) && !isUserStop(result.error)) {
         await rejectModuleAttempt(result)
         get()._post('assistant', `M${module.id} ${module.title}缺少必要内容，正在自动补全，不需要手动重试。`, 'narration')
-        for (let validationPass = 1; validationPass <= 2 && validationErrors.length > 0; validationPass++) {
+        for (let validationPass = 1; validationPass <= 2 && validationErrors.length > 0 &&
+          !aborts.aborted && isCurrentSession(); validationPass++) {
           const corrected = await runModelRetry(
             [
               ...messages,
@@ -2765,9 +2924,7 @@ export const useStore = create<StoreState>((set, get) => ({
               }
             ],
             () => {},
-            (fn) => {
-              if (isCurrentSession()) set({ abortFn: fn })
-            },
+            setModuleAbort,
             undefined,
             1,
             { ...moduleTaskContext, stepId: `${module.key}-validation-retry-${validationPass}` }
@@ -2804,7 +2961,9 @@ export const useStore = create<StoreState>((set, get) => ({
       }
       if (isNoAnalysisOutput(moduleOutput)) {
         await rejectModuleAttempt(result)
-        if (explicitRedo && saved?.output) {
+        if (explicitRedo && saved?.output && !saved.outputInvalidated) {
+          const retainedOutput = saved.output
+          set((state) => ({ artifacts: { ...state.artifacts, [module.id]: retainedOutput } }))
           updateModuleState(module.key, { status: 'done',
             message: '本次重做未得到可用结果，已保留上一份完整结果；本次不扣费。',
             updatedAt: saved.updatedAt })
@@ -2814,7 +2973,9 @@ export const useStore = create<StoreState>((set, get) => ({
         set((state) => ({
           taskJournal: {
             ...state.taskJournal,
-            [savedTaskId]: { kind: 'module', status: 'complete', output, inputFingerprint, updatedAt: new Date().toISOString() }
+            [savedTaskId]: saved?.outputInvalidated ? saved : {
+              kind: 'module', status: 'complete', output, inputFingerprint, updatedAt: new Date().toISOString()
+            }
           }
         }))
         updateModuleState(module.key, { status: 'skipped', message: output, updatedAt: new Date().toISOString() })
@@ -2830,106 +2991,118 @@ export const useStore = create<StoreState>((set, get) => ({
         }
       }))
       updateModuleState(module.key, { status: 'done', updatedAt: new Date().toISOString() })
-      await window.api.saveLastProject(buildProjectSnapshot(get()))
-      const billingResult = await confirmSavedResult(billingLogicalId, result, moduleOutput)
-      if (billingResult.state === 'charged') {
-        set((state) => ({ taskJournal: {
-          ...state.taskJournal,
-          [savedTaskId]: { ...state.taskJournal[savedTaskId], billingConfirmed: true }
-        } }))
-        await window.api.saveLastProject(buildProjectSnapshot(get()))
-      }
+      await confirmModuleTask(savedTaskId, get().taskJournal[savedTaskId])
     }
 
-    for (const wave of [1, 2, 3] as const) {
-      if (!isCurrentSession() || get().phase !== 'analyzing') return
-      if (wave === 2) {
-        try {
-          if (materialScanErrors.length) throw new Error(`素材卖点表有 ${materialScanErrors.length} 个解析错误，无法保证词云覆盖完整。`)
-          const insight = await runMaterialInsightWorkflow({
-            rows: materialScope.rows,
-            selectedProducts: materialScope.selectedProducts,
-            scopeLabel: materialScope.label,
-            sessionId,
-            sourceCount: sourceCountV1,
-            imageCount: imageCountV1,
-            getTask: (id) => isCurrentSession() ? get().taskJournal[id] : undefined,
-            saveTask: async (id, task) => {
-              if (!isCurrentSession()) return
-              set((state) => ({ taskJournal: { ...state.taskJournal, [id]: task } }))
-              await window.api.saveLastProject(buildProjectSnapshot(get()))
-            },
-            setAbort: (fn) => { if (isCurrentSession()) set({ abortFn: fn }) },
-            onProgress: (message) => { if (isCurrentSession()) get()._post('assistant', message, 'narration') }
-          })
-          if (isCurrentSession()) get()._post('assistant', `素材卖点统计已完成：${insight.effectiveMaterials}/${insight.totalMaterials} 份素材提取到有效卖点，展示 ${insight.items.length} 个。`, 'narration')
-        } catch (error) {
-          if (!isCurrentSession()) return
-          const rowsFingerprint = materialInsightFingerprint(materialScope.rows, materialScope.selectedProducts)
-          const failureId = `${materialInsightTaskPrefix(sessionId, rowsFingerprint)}:final`
-          const message = friendlyError(error)
-          set((state) => ({ taskJournal: {
-            ...state.taskJournal,
-            [failureId]: { kind: 'module', status: 'failed', output: message, inputFingerprint: rowsFingerprint, updatedAt: new Date().toISOString() }
-          } }))
-          await window.api.saveLastProject(buildProjectSnapshot(get()))
-          get()._post('assistant', `素材卖点词云待重试：${message}。其他模块继续分析，不会用示例词替代。`, 'error')
+    try {
+      for (const wave of [1, 2, 3] as const) {
+        if (!isCurrentSession() || aborts.aborted || get().phase !== 'analyzing') break
+        if (wave === 2) {
+          try {
+            if (ownMaterialScanErrors.length) throw new Error(`自有素材卖点表有 ${ownMaterialScanErrors.length} 个解析错误，无法保证词云覆盖完整。`)
+            const insight = await runMaterialInsightWorkflow({
+              rows: ownMaterialScope.rows,
+              selectedProducts: ownMaterialScope.selectedProducts,
+              scopeLabel: ownMaterialScope.label,
+              sessionId,
+              sourceCount: sourceCountV1,
+              imageCount: imageCountV1,
+              getTask: (id) => isCurrentSession() ? get().taskJournal[id] : undefined,
+              saveTask: async (id, task) => {
+                if (!isCurrentSession()) return
+                set((state) => ({ taskJournal: { ...state.taskJournal, [id]: task } }))
+                await window.api.saveLastProject(buildProjectSnapshot(get()))
+              },
+              setAbort: aborts.createSetter(),
+              onProgress: (message) => { if (isCurrentSession()) get()._post('assistant', message, 'narration') }
+            })
+            if (isCurrentSession()) get()._post('assistant', `素材卖点统计已完成：${insight.effectiveMaterials}/${insight.totalMaterials} 份素材提取到有效卖点，展示 ${insight.items.length} 个。`, 'narration')
+          } catch (error) {
+            if (!isCurrentSession()) return
+            const rowsFingerprint = materialInsightFingerprint(ownMaterialScope.rows, ownMaterialScope.selectedProducts)
+            const failureId = `${materialInsightTaskPrefix(sessionId, rowsFingerprint)}:final`
+            const message = friendlyError(error)
+            set((state) => ({ taskJournal: {
+              ...state.taskJournal,
+              [failureId]: { kind: 'module', status: 'failed', output: message, inputFingerprint: rowsFingerprint, updatedAt: new Date().toISOString() }
+            } }))
+            await window.api.saveLastProject(buildProjectSnapshot(get()))
+            get()._post('assistant', `素材卖点词云待重试：${message}。其他模块继续分析，不会用示例词替代。`, 'error')
+          }
+        }
+        if (!isCurrentSession() || aborts.aborted) break
+        const runnable = REPORT_MODULES.filter((module) => module.wave === wave)
+        get()._post('assistant', `正在执行第${wave}/3波：${runnable.map((module) => `M${module.id} ${module.title}`).join('、')}`, 'narration')
+        const results = await Promise.allSettled(runnable.map((module) => runModule(module)))
+        if (!isCurrentSession()) return
+        for (const [index, result] of results.entries()) {
+          if (result.status !== 'rejected') continue
+          const module = runnable[index]
+          const message = friendlyError(result.reason)
+          const taskId = `${sessionId}:module:v2:${module.key}`
+          const retained = get().taskJournal[taskId]
+          updateModuleState(module.key, { status: 'failed',
+            message: retained?.status === 'complete'
+              ? `完整结果已保留，保存或积分确认暂未完成；重试会先恢复确认。${message}` : message,
+            updatedAt: new Date().toISOString() })
+          set((state) => ({
+            taskJournal: {
+              ...state.taskJournal,
+              [taskId]: retained?.status === 'complete' ? retained : {
+                kind: 'module', status: 'failed', updatedAt: new Date().toISOString()
+              }
+            }
+          }))
         }
       }
-      const runnable = REPORT_MODULES.filter((module) => module.wave === wave)
-      get()._post('assistant', `正在执行第${wave}/3波：${runnable.map((module) => `M${module.id} ${module.title}`).join('、')}`, 'narration')
-      const results = await Promise.allSettled(runnable.map((module) => runModule(module)))
-      for (const [index, result] of results.entries()) {
-        if (result.status !== 'rejected') continue
-        const module = runnable[index]
-        const message = friendlyError(result.reason)
-        const taskId = `${sessionId}:module:v2:${module.key}`
-        updateModuleState(module.key, { status: 'failed', message, updatedAt: new Date().toISOString() })
-        set((state) => ({
-          taskJournal: {
-            ...state.taskJournal,
-            [taskId]: { kind: 'module', status: 'failed', updatedAt: new Date().toISOString() }
+      if (!isCurrentSession()) return
+      if (aborts.aborted) {
+        for (const module of REPORT_MODULES) {
+          const status = get().moduleStates[module.key]?.status
+          if (!status || status === 'running') {
+            updateModuleState(module.key, { status: 'failed', message: '已停止', updatedAt: new Date().toISOString() })
           }
-        }))
+        }
       }
+      const outputByKey: Partial<Record<ModuleKey, string>> = {}
+      const messageByKey: Partial<Record<ModuleKey, string>> = {}
+      for (const module of REPORT_MODULES) {
+        outputByKey[module.key] = get().moduleStates[module.key]?.status === 'done' ? get().artifacts[module.id] : undefined
+        messageByKey[module.key] = get().moduleStates[module.key]?.message
+      }
+      const finishedStates = REPORT_MODULES.map((module) => get().moduleStates[module.key]?.status)
+      const failedCount = finishedStates.filter((status) => status === 'failed').length
+      const blockedCount = finishedStates.filter((status) => status === 'blocked').length
+      const skippedCount = finishedStates.filter((status) => status === 'skipped').length
+      const doneCount = finishedStates.filter((status) => status === 'done').length
+      const report = assembleModuleReport(REPORT_MODULES, outputByKey, messageByKey, get().legacyBenchmarkAppendix)
+      set((state) => ({
+        reportMarkdown: report,
+        artifacts: { ...state.artifacts, [REPORT_STEP_ID]: report },
+        reportStale: false,
+        phase: failedCount || blockedCount ? 'checkpoint1' : 'done',
+        abortFn: null
+      }))
+      await window.api.saveLastProject(buildProjectSnapshot(get()))
+      if (!failedCount && !blockedCount) await storeCompleteReportResult(get()).catch(() => undefined)
+      if (failedCount > 0 || blockedCount > 0) {
+        get()._post(
+          'assistant',
+          `⚠️ 分析尚未完成：成功 ${doneCount} 个、失败 ${failedCount} 个、等待上游 ${blockedCount} 个、暂无分析 ${skippedCount} 个。请先重试失败模块；依赖模块未调用模型，也不会把这份初稿当作完整报告导出。`,
+          'error'
+        )
+      } else {
+        get()._post(
+          'assistant',
+          `✅ 6模块分析已完成：成功 ${doneCount} 个、暂无分析 ${skippedCount} 个。可直接检查并导出。`,
+          'checkpoint'
+        )
+      }
+      return
+    } finally {
+      aborts.abort()
+      if (isCurrentSession() && get().abortFn === aborts.abort) set({ abortFn: null })
     }
-    if (!isCurrentSession()) return
-    const outputByKey: Partial<Record<ModuleKey, string>> = {}
-    const messageByKey: Partial<Record<ModuleKey, string>> = {}
-    for (const module of REPORT_MODULES) {
-      outputByKey[module.key] = get().moduleStates[module.key]?.status === 'done' ? get().artifacts[module.id] : undefined
-      messageByKey[module.key] = get().moduleStates[module.key]?.message
-    }
-    const finishedStates = REPORT_MODULES.map((module) => get().moduleStates[module.key]?.status)
-    const failedCount = finishedStates.filter((status) => status === 'failed').length
-    const blockedCount = finishedStates.filter((status) => status === 'blocked').length
-    const skippedCount = finishedStates.filter((status) => status === 'skipped').length
-    const doneCount = finishedStates.filter((status) => status === 'done').length
-    const report = assembleModuleReport(REPORT_MODULES, outputByKey, messageByKey, get().legacyBenchmarkAppendix)
-    set((state) => ({
-      reportMarkdown: report,
-      artifacts: { ...state.artifacts, [REPORT_STEP_ID]: report },
-      reportStale: false,
-      phase: failedCount || blockedCount ? 'checkpoint1' : 'done',
-      abortFn: null
-    }))
-    await window.api.saveLastProject(buildProjectSnapshot(get()))
-    if (!failedCount && !blockedCount) await storeCompleteReportResult(get()).catch(() => undefined)
-    if (failedCount > 0 || blockedCount > 0) {
-      get()._post(
-        'assistant',
-        `⚠️ 分析尚未完成：成功 ${doneCount} 个、失败 ${failedCount} 个、等待上游 ${blockedCount} 个、暂无分析 ${skippedCount} 个。请先重试失败模块；依赖模块未调用模型，也不会把这份初稿当作完整报告导出。`,
-        'error'
-      )
-    } else {
-      get()._post(
-        'assistant',
-        `✅ 6模块分析已完成：成功 ${doneCount} 个、暂无分析 ${skippedCount} 个。可直接检查并导出。`,
-        'checkpoint'
-      )
-    }
-    return
-
   },
 
   _rerunReport: async (latestFeedback) => {
@@ -3187,12 +3360,13 @@ export const useStore = create<StoreState>((set, get) => ({
   retryMaterialInsight: async () => {
     if (materialInsightRetryRunning || isRunningPhase(get().phase) || get().readOnly) return
     const scanErrors: string[] = []
-    const rows = readMaterialInsightRows(get().sources, scanErrors)
+    const rows = readMaterialInsightRows(get().sources)
+    readOwnMaterialInsightRows(get().sources, scanErrors)
     if (scanErrors.length) {
       get()._post('assistant', `${scanErrors.slice(0, 3).join('；')} 请修正表格后再重试词云。`, 'error')
       return
     }
-    const scope = selectMaterialInsightScope(rows, get().selectedMaterialProducts)
+    const scope = selectOwnMaterialInsightScope(rows, get().selectedMaterialProducts)
     if (scope.needsSelection) {
       get()._post('assistant', scope.error || '请先确认素材产品范围。', 'error')
       return
@@ -3274,7 +3448,9 @@ export const useStore = create<StoreState>((set, get) => ({
     set({ exportStatus: '导出中…', lastExportPath: '' })
     const name = defaultReportName(format)
     const displayMarkdown = reportMarkdownForDisplay(md, buildEvidenceSourceNameMap(cleanDetails))
-    const insightScope = selectMaterialInsightScope(readMaterialInsightRows(get().sources), get().selectedMaterialProducts)
+    const materialRows = readMaterialInsightRows(get().sources)
+    const sceneScope = selectMaterialInsightScope(materialRows, get().selectedMaterialProducts)
+    const insightScope = selectOwnMaterialInsightScope(materialRows, get().selectedMaterialProducts)
     const insightFingerprint = materialInsightFingerprint(insightScope.rows, insightScope.selectedProducts)
     const insightId = `${materialInsightTaskPrefix(get().analysisSessionId, insightFingerprint)}:final`
     const materialInsight = !reportStale && !insightScope.needsSelection
@@ -3295,8 +3471,8 @@ export const useStore = create<StoreState>((set, get) => ({
       }))
     } : undefined
     const materialInsightStatus = materialInsight ? 'ready' : get().taskJournal[insightId]?.status === 'failed' ? 'failed' : 'missing'
-    const allSceneRows = !reportStale && !insightScope.needsSelection ? readMaterialInsightRows(get().sources) : []
-    const sceneCatalog = buildSceneCatalog(allSceneRows.filter((row) => insightScope.selectedProducts.includes(row.product) || /竞品|竞对/u.test(row.attribution)))
+    const allSceneRows = !reportStale && !sceneScope.needsSelection ? materialRows : []
+    const sceneCatalog = buildSceneCatalog(allSceneRows.filter((row) => sceneScope.selectedProducts.includes(row.product) || /竞品|竞对/u.test(row.attribution)))
     const usedSceneIds = new Set([...displayMarkdown.matchAll(/SC-[a-f0-9]{8}-\d{4}/giu)].map((match) => match[0].toUpperCase()))
     const sceneSourceAppendix = sceneCatalog.filter((item) => usedSceneIds.has(item.id.toUpperCase()))
       .map((item) => `- ${item.text}（${item.id}）：${item.sources.map((source) => `${source.sourceName} / ${source.sheetName} / ${source.rowEvidenceId}`).join('；')}`)

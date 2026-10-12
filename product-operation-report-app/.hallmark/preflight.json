@@ -1,0 +1,10 @@
+{
+  "date": "2026-10-13",
+  "scope": "six-module HTML export",
+  "implementation": "TypeScript string renderer with inline CSS",
+  "fonts": "Local Chinese system font stacks; no external requests",
+  "tokens": "src/main/htmlReportDesign.ts and renderTokenBlock in htmlReportStyles.ts",
+  "interactions": "Native links, details and radio controls; no script execution",
+  "preserved": ["report content", "source evidence", "platform metrics", "own-material word cloud", "offline output"],
+  "merchantPolicy": "Share data semantics; vary palette, typography and cover using product identity and stable brand signature"
+}

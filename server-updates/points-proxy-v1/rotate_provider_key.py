@@ -21,7 +21,7 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 
-ALLOWED_MODELS = ("gpt-5.5", "gpt-5.6-sol", "claude-sonnet-4-6", "gemini-3-flash", "kimi-k2.6")
+from provider_config import ALLOWED_MODELS
 DEFAULT_PATH = os.environ.get("POR_PROVIDER_KEYS_FILE", "/etc/product-operation-report/provider-keys.json")
 SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 
@@ -102,7 +102,8 @@ def probe_key(base_url: str, model: str, secret: str) -> None:
         "model": model,
         "messages": [{"role": "user", "content": "Reply OK"}],
         "stream": False,
-        "max_completion_tokens": 8,
+        "max_tokens": 16,
+        "thinking": {"type": "disabled"},
     }, separators=(",", ":")).encode("utf-8")
     request = Request(
         f"{base_url.rstrip('/')}/chat/completions",
@@ -114,7 +115,11 @@ def probe_key(base_url: str, model: str, secret: str) -> None:
         with urlopen(request, timeout=45) as response:
             if response.status < 200 or response.status >= 300:
                 raise SystemExit(f"Provider check failed with HTTP {response.status}; no changes were made.")
-            response.read(1024 * 1024)
+            result = json.loads(response.read(1024 * 1024))
+            choices = result.get("choices") if isinstance(result, dict) else None
+            content = choices[0].get("message", {}).get("content") if isinstance(choices, list) and choices and isinstance(choices[0], dict) else None
+            if not isinstance(content, str) or not content.strip():
+                raise SystemExit("Provider check returned no answer; no changes were made.")
     except HTTPError as error:
         error.read(16 * 1024)
         raise SystemExit(f"Provider check failed with HTTP {error.code}; no changes were made.") from error
@@ -188,6 +193,11 @@ def main() -> None:
             profile["active_key_id"] = args.key_id
         for model in args.models:
             models[model] = args.profile
+        # An old keyring may contain GPT/Claude routes. Preserve its profiles
+        # for rollback, but remove unsupported model mappings on the Ark migration.
+        for model in list(models):
+            if model not in ALLOWED_MODELS:
+                del models[model]
     elif args.command == "activate":
         profile = profiles.get(args.profile)
         if not isinstance(profile, dict) or args.key_id not in profile.get("keys", {}):

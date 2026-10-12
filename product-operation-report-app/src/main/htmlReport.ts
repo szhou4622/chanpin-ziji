@@ -8,6 +8,7 @@ import {
   type HtmlReportSectionPresentation
 } from './htmlReportPresentation'
 import { renderReportStyles, type ReportThemeTokens } from './htmlReportStyles'
+import { resolveHtmlReportDesign, type HtmlReportDesign } from './htmlReportDesign'
 import {
   decodeHtmlEntities,
   parseHtmlReportModel,
@@ -620,7 +621,7 @@ function renderMaterialInsightCloud(
   insight: MaterialSellingPointInsight | undefined,
   status: 'ready' | 'failed' | 'missing'
 ): string {
-  const subtitle = '基于本次上传素材的「卖点排序Top3」提取；同一素材内相同卖点仅计一次，字号表示出现素材数。'
+  const subtitle = `基于${insight?.sourceScope === 'own' ? '自有' : '本次上传'}素材的「卖点排序Top3」提取。同一素材内相同卖点仅计一次，点击词语查看原始表达与来源。`
   if (!insight) {
     return `<section class="keyword-panel material-insight-cloud"><h3>素材高频卖点 Top20</h3><p>${escapeHtml(
       status === 'failed' ? '卖点提取未完成，词云待重试；其他报告内容不受影响。' :
@@ -630,9 +631,11 @@ function renderMaterialInsightCloud(
   const items = insight.items
   const min = items.length ? Math.min(...items.map((item) => item.materialCount)) : 0
   const max = items.length ? Math.max(...items.map((item) => item.materialCount)) : 0
-  const fontSize = (count: number): number => max === min ? 26 : Math.round(17 + (count - min) / (max - min) * 25)
+  const fontSize = (count: number): number => max === min ? 24 : Math.round(15 + (count - min) / (max - min) * 21)
+  const selectionStyles = items.map((_, index) => `.material-insight-cloud:has(#cloud-term-${index}:checked) .cloud-evidence-${index} { display: block; }`).join('\n')
   return `<section class="keyword-panel material-insight-cloud" aria-labelledby="material-cloud-title">
-    <header><div><small>分析范围：${escapeHtml(insight.scopeLabel)}</small><h3 id="material-cloud-title">素材高频卖点 Top20</h3></div></header>
+    <style>${selectionStyles}</style>
+    <header><div><small>分析范围：${escapeHtml(insight.scopeLabel)}</small><h3 id="material-cloud-title">素材高频卖点 Top20</h3></div><span class="cloud-scope">${insight.sourceScope === 'own' ? '自有素材' : '素材统计'}</span></header>
     <p class="visual-note">${escapeHtml(subtitle)}</p>
     <div class="material-insight-summary">
       <span>分析素材 <strong>${insight.totalMaterials}</strong></span>
@@ -641,21 +644,35 @@ function renderMaterialInsightCloud(
       <span>当前展示 <strong>${items.length}</strong></span>
       <span>卖点排序缺失 <strong>${insight.missingSellingPointMaterials || 0}</strong></span>
     </div>
-    ${items.length ? `<div class="word-cloud material-insight-words" role="list" aria-label="素材卖点出现频次">
-      ${items.map((item) => `<span class="word-cloud__item" role="listitem" tabindex="0"
-        style="font-size:${fontSize(item.materialCount)}px" title="${escapeHtml(`${item.keyword}；出现素材数 ${item.materialCount}；覆盖率 ${(item.coverageRate * 100).toFixed(1)}%；Top1 ${item.top1Count} / Top2 ${item.top2Count} / Top3 ${item.top3Count} / 未排序 ${item.unrankedCount}；辅助得分 ${item.rankScore}`)}">
-        <b>${escapeHtml(item.keyword)}</b><small>×${item.materialCount}</small></span>`).join('')}
-    </div>
-    <div class="material-insight-evidence">${items.map((item) => `<details><summary>${escapeHtml(item.keyword)} · ${item.materialCount}份素材 · 查看原始表达与来源</summary>
-      ${(item.evidenceTotal || item.evidence.length) > item.evidence.length
-        ? `<p class="visual-note">为保持报告流畅，这里展示 ${item.evidence.length}/${item.evidenceTotal} 条来源样例；完整逐行映射保存在本机项目中。</p>` : ''}
-      <div class="material-insight-evidence-list">${item.evidence.map((evidence) => `<p><strong>${escapeHtml(evidence.rawDescription)}</strong>
-      <small>候选：${escapeHtml(evidence.candidate)}；原文片段：${escapeHtml(evidence.evidenceSnippet)}；${escapeHtml(evidence.sourceName)} / ${escapeHtml(evidence.sheetName)} / ${escapeHtml(evidence.rowEvidenceId)} / ${evidence.topRank ? `Top${evidence.topRank}` : '未排序'}</small></p>`).join('')}</div></details>`).join('')}</div>`
-      : '<p class="visual-note">未从卖点排序字段中识别到可统计卖点。</p>'}
+    ${items.length ? `<div class="cloud-explorer">
+      <div class="cloud-visual">
+        <p class="cloud-axis-note"><span>字号越大，出现素材越多</span><span>支持方向键切换词语</span></p>
+        <div class="word-cloud material-insight-words" role="radiogroup" aria-label="素材卖点出现频次，选择词语查看证据">
+          ${items.map((item, index) => `<label class="word-cloud__item" for="cloud-term-${index}" data-cloud-emphasis="${item.materialCount === max ? 'high' : 'normal'}"
+            style="--cloud-size:${fontSize(item.materialCount)}px" title="${escapeHtml(`${item.keyword}；出现素材数 ${item.materialCount}；覆盖率 ${(item.coverageRate * 100).toFixed(1)}%；Top1 ${item.top1Count} / Top2 ${item.top2Count} / Top3 ${item.top3Count} / 未排序 ${item.unrankedCount}；辅助得分 ${item.rankScore}`)}">
+            <input class="cloud-control" type="radio" name="material-cloud-term" id="cloud-term-${index}" aria-controls="cloud-evidence-${index}"${index === 0 ? ' checked' : ''}>
+            <b>${escapeHtml(item.keyword)}</b><small>×${item.materialCount}</small></label>`).join('')}
+        </div>
+      </div>
+      <aside class="cloud-rankings" aria-label="卖点出现素材数排行">
+        <h4>高频卖点排行</h4><p>按出现素材数排序 · 前 ${Math.min(items.length, 6)} 项</p>
+        ${items.slice(0, 6).map(item => `<div class="cloud-ranking"><div><span>${escapeHtml(item.keyword)}</span><strong>${item.materialCount} 份</strong></div><span class="cloud-rank-track" aria-hidden="true"><i style="--frequency-width:${max > 0 ? Math.max(0, Math.min(100, item.materialCount / max * 100)) : 0}%"></i></span></div>`).join('')}
+      </aside>
+      <div class="cloud-evidence material-insight-evidence">${items.map((item, index) => `<section id="cloud-evidence-${index}" class="cloud-evidence-panel cloud-evidence-${index}" aria-label="${escapeHtml(item.keyword)}的原始证据">
+        <header><h4>${escapeHtml(item.keyword)}</h4><span>${item.materialCount} 份素材 · 覆盖 ${(item.coverageRate * 100).toFixed(1)}%</span></header>
+        <p>Top1 ${item.top1Count} · Top2 ${item.top2Count} · Top3 ${item.top3Count} · 未排序 ${item.unrankedCount} · 辅助得分 ${item.rankScore}</p>
+        ${(item.evidenceTotal || item.evidence.length) > item.evidence.length
+          ? `<p class="visual-note">为保持报告流畅，这里展示 ${item.evidence.length}/${item.evidenceTotal} 条来源样例；完整逐行映射保存在本机项目中。</p>` : ''}
+        <div class="material-insight-evidence-list">${item.evidence.map((evidence, sourceIndex) => `<details${sourceIndex === 0 ? ' open' : ''}><summary>${escapeHtml(evidence.rawDescription)}</summary>
+          <blockquote>${escapeHtml(evidence.evidenceSnippet)}</blockquote>
+          <small>归一前表达：${escapeHtml(evidence.candidate)}<br>来源：${escapeHtml(evidence.sourceName)} / ${escapeHtml(evidence.sheetName)} / ${escapeHtml(evidence.rowEvidenceId)} / ${evidence.topRank ? `Top${evidence.topRank}` : '未排序'}</small>
+        </details>`).join('')}</div></section>`).join('')}</div>
+    </div>`
+      : `<p class="visual-note">${insight.sourceScope === 'own' && insight.totalMaterials === 0 ? '未上传本次范围的自有素材，暂无词云统计。' : '未从卖点排序字段中识别到可统计卖点。'}</p>`}
     <div class="material-insight-print-copy" aria-hidden="true">${items.map((item) => `<h4>${escapeHtml(item.keyword)}</h4>${item.evidence.map((evidence) =>
       `<p>${escapeHtml(evidence.rawDescription)}（${escapeHtml(evidence.sourceName)} / ${escapeHtml(evidence.sheetName)} / ${escapeHtml(evidence.rowEvidenceId)}）</p>`
     ).join('')}`).join('')}</div>
-    <p class="visual-note">本图仅表示卖点进入本次素材Top3的频率，不代表消费者偏好、转化率或产品宣称已获验证。</p>
+    <p class="visual-note cloud-footnote">本图仅表示卖点进入本次素材Top3的频率，不代表消费者偏好、转化率或产品宣称已获验证。</p>
   </section>`
 }
 
@@ -1126,23 +1143,23 @@ function renderSectionVisual(
   )
 }
 
-function renderHero(model: HtmlReportModel, presentation: HtmlReportPresentation): string {
+function renderHero(model: HtmlReportModel, presentation: HtmlReportPresentation, design?: HtmlReportDesign): string {
   const primaryAudience = presentation.primaryAudience
   const mainMetric = presentation.mainMetric
   const audienceParts = primaryAudience?.audience
     .split(/[｜|]/u)
     .map((part) => part.trim())
     .filter(Boolean) || []
-  const displayTitle = model.title.replace(/\s*(?:产品内容策略报告|产品与内容经营报告|产品经营报告)\s*$/u, '').trim() || model.title
+  const displayTitle = design?.productName || model.title.replace(/\s*(?:产品内容策略报告|产品与内容经营报告|产品经营报告)\s*$/u, '').trim() || model.title
   const heroSource = primaryAudience?.source || mainMetric?.source
   const sourceAttrs = heroSource
     ? ` data-source-section="${escapeHtml(heroSource.sectionNumber)}" data-source-table="${heroSource.tableIndex ?? ''}" data-source-row="${heroSource.rowIndex ?? ''}" data-source-column="${heroSource.columnIndex ?? ''}" data-source-value="${escapeHtml(heroSource.rawValue)}"`
     : ''
   return `<header class="story-stat-hero">
-    <div class="story-stat-hero__meta">
-      <span>产品内容策略报告</span>
+    ${design && !model.dateLine ? '' : `<div class="story-stat-hero__meta">
+      <span>${design ? '经营研究' : '产品内容策略报告'}</span>
       <span>${model.dateLine ? escapeHtml(model.dateLine) : '六模块综合分析'}</span>
-    </div>
+    </div>`}
     <div class="story-stat-hero__grid">
       ${
         primaryAudience
@@ -1163,6 +1180,7 @@ function renderHero(model: HtmlReportModel, presentation: HtmlReportPresentation
             </div>`
       }
       <div class="hero-copy">
+        ${design?.productName ? '<p class="hero-report-label">产品内容策略报告</p>' : ''}
         <h1>${escapeHtml(displayTitle)}</h1>
         <p class="hero-thesis">${escapeHtml(shorten(presentation.thesis, 190))}</p>
       </div>
@@ -1374,9 +1392,10 @@ function renderToc(headings: HeadingInfo[], model: HtmlReportModel): string {
     ${visibleHeadings
       .map(
         (heading) =>
-          `<a class="level-${heading.level}" href="#${escapeHtml(heading.id)}">${escapeHtml(heading.text)}</a>`
+          `<a class="level-${heading.level}" href="#${escapeHtml(heading.id)}">${moduleReport ? `<span class="toc-no" aria-hidden="true">${String(visibleHeadings.indexOf(heading) + 1).padStart(2, '0')}</span><span>${escapeHtml(heading.text.replace(/^(?:M[1-8]\s+|内容洞察决策[一二三四五六]\s*[：:]\s*)/u, ''))}</span>` : escapeHtml(heading.text)}</a>`
       )
       .join('')}
+    ${moduleReport ? '<p class="toc-note">先读结论，再核对来源。<br>各章节保留完整数据明细。</p>' : ''}
   </nav>`
 }
 
@@ -1416,7 +1435,8 @@ export async function markdownToHtmlDocument(
     ? bodyWithoutHero.slice(0, -aiDisclaimer.length)
     : bodyWithoutHero
   const sectionBody = wrapSections(reportBody, model, headings, presentation, materialInsight, materialInsightStatus, sceneCatalog)
-  const tokens = THEME_TOKENS[model.brief.designDirection]
+  const design = isModuleReport ? resolveHtmlReportDesign(model) : undefined
+  const tokens = design?.tokens || THEME_TOKENS[model.brief.designDirection]
   const toc = renderToc(headings, model)
   const reportFormat = isModuleReport ? 'modules' : 'chapters'
   return `<!doctype html>
@@ -1425,18 +1445,20 @@ export async function markdownToHtmlDocument(
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; script-src 'none'; connect-src 'none'; font-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none';">
-  <title>${escapeHtml(model.title)}</title>
+  <title>${escapeHtml(design?.productName ? `${design.productName} · ${model.title}` : model.title)}</title>
   <style>
-    /* Report design read: source-bound decision report for novice business users; variance 5, motion 1, density 6. */
+    /* Hallmark · macrostructure: Long Document · merchant-adaptive · offline
+       pre-emit critique: P5 H4 E4 S4 R4 V4 · rationale: docs/html-report-design.md */
     ${renderReportStyles(tokens)}
   </style>
 </head>
-<body data-report-direction="${escapeHtml(model.brief.designDirection)}" data-report-format="${reportFormat}">
+<body data-report-direction="${escapeHtml(model.brief.designDirection)}" data-report-format="${reportFormat}"${design ? ` data-report-style="${design.direction}" data-brand-variant="${design.variant}" data-style-source="${design.reason}"` : ''}>
   <a class="skip-link" href="#report-main">跳到报告正文</a>
+  ${design ? `<header class="report-masthead"><div class="report-masthead__brand"><strong>${escapeHtml(design.brandName || '产品内容策略系统')}</strong><span>经营分析与内容研究</span></div><span>${model.sections.length} 个分析模块 · 可离线阅读</span></header>` : ''}
   <main class="shell">
     ${toc}
     <article class="report" id="report-main" tabindex="-1">
-      ${renderHero(model, presentation)}
+      ${renderHero(model, presentation, design)}
       ${renderDecisionDashboard(presentation)}
       ${renderChapterIndex(headings, model)}
       <div class="report-body">

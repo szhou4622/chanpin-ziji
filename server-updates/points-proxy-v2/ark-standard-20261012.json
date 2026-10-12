@@ -1,0 +1,20 @@
+{
+  "version": "ARK-STANDARD-2026-10-12",
+  "group": "standard",
+  "currency": "CNY",
+  "unit": "per_1m_tokens",
+  "points_per_cny": "100",
+  "cost_rate": "0.5",
+  "source_url": "https://docs.volcengine.com/docs/ark/model-pricing?lang=en&redirect=1",
+  "checked_date": "2026-10-12",
+  "legacy_source_sha256": "2d9ba0955fa8d7dd36972d14a2f8ffb46bc35767769e11857cdff5a5591b5c66",
+  "legacy_conversion_usd_cny": "7.2",
+  "models": {
+    "doubao-seed-2-1-pro-260915": ["6", "30", "1.2", "6"],
+    "gpt-5.5": ["9", "54", "0.9", "5.76"],
+    "gpt-5.6-sol": ["9", "72", "0.9", "7.2"],
+    "claude-sonnet-4-6": ["2.88", "14.4", "0.288", "1.44"],
+    "gemini-3-flash": ["8.64", "43.2", "0.864", "4.32"],
+    "kimi-k2.6": ["5.76", "28.8", "0.576", "2.88"]
+  }
+}

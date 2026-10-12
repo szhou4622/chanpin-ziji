@@ -67,6 +67,10 @@ describe('selling-point keyword cloud', () => {
     expect(html).toContain('Top1 1 / Top2 1')
     const empty = await markdownToHtmlDocument(markdown, { ...insight, effectiveMaterials: 0, normalizedCount: 0, items: [] })
     expect(empty).toContain('未从卖点排序字段中识别到可统计卖点。')
+    const noOwn = await markdownToHtmlDocument(markdown, { ...insight, sourceScope: 'own',
+      totalMaterials: 0, effectiveMaterials: 0, normalizedCount: 0, items: [] })
+    expect(noOwn).toContain('未上传本次范围的自有素材，暂无词云统计。')
+    expect(noOwn).not.toContain('未从卖点排序字段中识别到可统计卖点。')
     const failed = await markdownToHtmlDocument(markdown, undefined, 'failed')
     expect(failed).toContain('词云待重试')
     expect(failed).not.toContain('未从卖点排序字段中识别到可统计卖点。')
