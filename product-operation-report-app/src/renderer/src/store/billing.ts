@@ -1,4 +1,17 @@
 import type { ModelRunResult } from './analysis'
+import type { ProjectTaskSnapshot } from '../../../shared/types'
+
+export function needsSavedResultConfirmation(task: ProjectTaskSnapshot | undefined): boolean {
+  return Boolean(task?.status === 'complete' && task.output?.trim() &&
+    !task.billingConfirmed && task.billingAttemptId && task.billingOutputSha256)
+}
+
+export async function confirmSavedTask(taskId: string, task: ProjectTaskSnapshot): Promise<{ state: string; chargedUnits: number }> {
+  return confirmSavedResult(task.billingLogicalTaskId || taskId, {
+    ok: true, text: task.output || '', requestId: task.billingAttemptId,
+    outputSha256: task.billingOutputSha256
+  }, task.output || '')
+}
 
 /** Only a digest crosses the network. The complete output remains on device. */
 export async function sha256Hex(text: string): Promise<string> {

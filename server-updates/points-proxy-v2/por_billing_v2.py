@@ -12,7 +12,6 @@ import json
 import os
 import re
 import sqlite3
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any, Callable
@@ -39,13 +38,16 @@ def amount_units(cost_cny: str, points_per_cny: str, cost_rate: str) -> int:
         raise BillingStateError("cost_cny must be a decimal string", 400)
     try:
         rate = Decimal(cost_rate)
+        point_rate = Decimal(points_per_cny)
+        if not rate.is_finite() or not point_rate.is_finite() or rate <= 0 or point_rate <= 0:
+            raise BillingStateError("invalid pricing conversion", 503)
         whole_points = (
-            Decimal(cost_cny) * Decimal(points_per_cny) / rate
+            Decimal(cost_cny) * point_rate / rate
         ).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
         result = whole_points * UNITS_PER_POINT
-    except (InvalidOperation, ZeroDivisionError) as error:
+    except (InvalidOperation, ZeroDivisionError, ValueError, TypeError) as error:
         raise BillingStateError("invalid pricing conversion", 503) from error
-    if rate <= 0 or result < 0 or result > 9_000_000_000_000_000_000:
+    if result < 0 or result > 9_000_000_000_000_000_000:
         raise BillingStateError("charge is outside supported precision", 409)
     return int(result)
 
@@ -125,36 +127,44 @@ def start_attempt(
     if existing_attempt:
         raise BillingStateError("attempt request_id already exists")
     task = db.execute(
-        "SELECT state,task_key FROM por_v2_tasks WHERE app_name=? AND code_id=? AND logical_task_id=?",
+        "SELECT state,task_key,task_type,redo_of FROM por_v2_tasks WHERE app_name=? AND code_id=? AND logical_task_id=?",
         (app_name, code_id, logical_task_id),
     ).fetchone()
+    if task is not None:
+        if ((task["task_key"], task["task_type"]) != (task_key, task_type)
+                or (redo_of and task["redo_of"] != redo_of)):
+            raise BillingStateError("logical task id conflicts with another task")
+        if task["state"] not in ("retryable", "interrupted"):
+            raise BillingStateError("logical task is already active or complete")
+        # Retries reuse the persisted redo identity. The client need only send
+        # it when first creating the explicit redo logical task.
+        redo_of = task["redo_of"]
+    # An older retryable logical ID must not bypass the same guards applied to
+    # a new ID after a replacement task has started or has been charged.
+    active_same_key = db.execute(
+        """SELECT 1 FROM por_v2_tasks WHERE app_name=? AND code_id=? AND task_key=?
+           AND logical_task_id!=?
+           AND state IN ('running','awaiting_receipt','awaiting_bill','billing_pending') LIMIT 1""",
+        (app_name, code_id, task_key, logical_task_id),
+    ).fetchone()
+    if active_same_key:
+        raise BillingStateError("same task already has an unsettled attempt")
+    prior = db.execute(
+        """SELECT logical_task_id FROM por_v2_tasks
+           WHERE app_name=? AND code_id=? AND task_key=? AND state='charged'
+           ORDER BY rowid DESC LIMIT 1""",
+        (app_name, code_id, task_key),
+    ).fetchone()
+    if prior is not None and (not redo_of or redo_of != prior["logical_task_id"]):
+        raise BillingStateError("completed task requires an explicit redo identity")
+    if redo_of and prior is None:
+        raise BillingStateError("redo target is not a charged task")
     if task is None:
-        active_same_key = db.execute(
-            """SELECT 1 FROM por_v2_tasks WHERE app_name=? AND code_id=? AND task_key=?
-               AND state IN ('running','awaiting_receipt','awaiting_bill','billing_pending') LIMIT 1""",
-            (app_name, code_id, task_key),
-        ).fetchone()
-        if active_same_key:
-            raise BillingStateError("same task already has an unsettled attempt")
-        prior = db.execute(
-            """SELECT logical_task_id FROM por_v2_tasks
-               WHERE app_name=? AND code_id=? AND task_key=? AND state='charged'
-               ORDER BY rowid DESC LIMIT 1""",
-            (app_name, code_id, task_key),
-        ).fetchone()
-        if prior is not None and (not redo_of or redo_of != prior["logical_task_id"]):
-            raise BillingStateError("completed task requires an explicit redo identity")
-        if redo_of and prior is None:
-            raise BillingStateError("redo target is not a charged task")
         db.execute(
             "INSERT INTO por_v2_tasks(app_name,code_id,logical_task_id,task_key,task_type,state,redo_of) VALUES(?,?,?,?,?,'running',?)",
             (app_name, code_id, logical_task_id, task_key, task_type, redo_of),
         )
     else:
-        if task["task_key"] != task_key:
-            raise BillingStateError("logical task id conflicts with another task")
-        if task["state"] not in ("retryable", "interrupted"):
-            raise BillingStateError("logical task is already active or complete")
         db.execute(
             "UPDATE por_v2_tasks SET state='running' WHERE app_name=? AND code_id=? AND logical_task_id=?",
             (app_name, code_id, logical_task_id),
@@ -164,6 +174,19 @@ def start_attempt(
         (request_id, app_name, code_id, logical_task_id, requested_model, reserved_units, _now()),
     )
     return "running"
+
+
+def valid_usage(usage: Any) -> bool:
+    if not isinstance(usage, dict):
+        return False
+    for name in ("input_tokens", "output_tokens"):
+        if type(usage.get(name)) is not int or usage[name] < 0:
+            return False
+    for name in ("cached_input_tokens", "cache_creation_input_tokens"):
+        if type(usage.get(name, 0)) is not int or usage.get(name, 0) < 0:
+            return False
+    return (usage.get("cached_input_tokens", 0) + usage.get("cache_creation_input_tokens", 0)
+            <= usage["input_tokens"])
 
 
 def finish_attempt(
@@ -178,10 +201,10 @@ def finish_attempt(
         raise BillingStateError("attempt is not running")
     # The proxy must have observed a normal provider finish itself. A client
     # receipt cannot turn an interrupted stream into a completed attempt.
-    valid = bool(complete and content.strip() and usage)
+    valid = bool(complete and content.strip() and valid_usage(usage))
     state = "awaiting_receipt" if valid else "failed_no_charge"
     safe_model = _id(response_model, "response_model") if response_model else ""
-    usage_json = json.dumps(usage, sort_keys=True, separators=(",", ":")) if usage else ""
+    usage_json = json.dumps(usage, sort_keys=True, separators=(",", ":")) if valid_usage(usage) else ""
     db.execute(
         """UPDATE por_v2_attempts SET state=?,response_model=?,output_sha256=?,
                   output_bytes=?,provider_usage_json=?,finished_at=? WHERE request_id=?""",
@@ -200,35 +223,45 @@ def confirm_saved(
     db: sqlite3.Connection, request_id: str, logical_task_id: str,
     received_sha256: str, receipt_id: str, locally_valid: bool,
 ) -> str:
+    if type(locally_valid) is not bool:
+        raise BillingStateError("invalid result confirmation", 400)
     attempt = db.execute(
-        """SELECT app_name,code_id,logical_task_id,state,output_sha256
+        """SELECT rowid,app_name,code_id,logical_task_id,state,output_sha256
            FROM por_v2_attempts WHERE request_id=?""", (request_id,)
     ).fetchone()
     if attempt is None or attempt["logical_task_id"] != logical_task_id:
         raise BillingStateError("result confirmation does not match an attempt")
+    if not locally_valid and attempt["state"] in ("failed_no_charge", "interrupted_no_charge"):
+        # A retry of a lost rejection response must not alter a newer attempt.
+        return attempt["state"]
     if attempt["state"] == "receipt_expired_no_charge":
         task = db.execute(
-            "SELECT state FROM por_v2_tasks WHERE app_name=? AND code_id=? AND logical_task_id=?",
+            "SELECT state,task_key FROM por_v2_tasks WHERE app_name=? AND code_id=? AND logical_task_id=?",
             (attempt["app_name"], attempt["code_id"], logical_task_id),
         ).fetchone()
         if task is None or task["state"] != "retryable":
             raise BillingStateError("result confirmation arrived after another attempt began")
-        db.execute("UPDATE por_v2_attempts SET state='awaiting_receipt' WHERE request_id=?", (request_id,))
-        db.execute(
-            "UPDATE por_v2_tasks SET state='awaiting_receipt' WHERE app_name=? AND code_id=? AND logical_task_id=?",
-            (attempt["app_name"], attempt["code_id"], logical_task_id),
-        )
-        attempt = db.execute(
-            "SELECT app_name,code_id,logical_task_id,state,output_sha256 FROM por_v2_attempts WHERE request_id=?",
-            (request_id,),
+        newer = db.execute(
+            """SELECT 1 FROM por_v2_attempts a JOIN por_v2_tasks t
+                 ON t.app_name=a.app_name AND t.code_id=a.code_id
+                   AND t.logical_task_id=a.logical_task_id
+               WHERE a.app_name=? AND a.code_id=? AND t.task_key=? AND a.rowid>? LIMIT 1""",
+            (attempt["app_name"], attempt["code_id"], task["task_key"], attempt["rowid"]),
         ).fetchone()
+        if newer is not None:
+            raise BillingStateError("result confirmation arrived after another attempt began")
+    if locally_valid:
+        # The desktop creates a fresh receipt ID after restarting. The output
+        # proof, not the receipt UUID, identifies a safe idempotent confirmation.
+        _id(receipt_id, "receipt_id")
+    proof_matches = (isinstance(received_sha256, str)
+                     and re.fullmatch(r"[0-9a-f]{64}", received_sha256)
+                     and hmac.compare_digest(_private_digest(received_sha256), attempt["output_sha256"]))
     if attempt["state"] in ("awaiting_bill", "billing_pending", "charged"):
-        if locally_valid and re.fullmatch(r"[0-9a-f]{64}", received_sha256) and hmac.compare_digest(
-            _private_digest(received_sha256), attempt["output_sha256"]
-        ):
+        if locally_valid and proof_matches:
             return attempt["state"]
         raise BillingStateError("result confirmation conflicts with an earlier receipt")
-    if attempt["state"] != "awaiting_receipt":
+    if attempt["state"] not in ("awaiting_receipt", "receipt_expired_no_charge"):
         raise BillingStateError("attempt is not awaiting result confirmation")
     if not locally_valid:
         db.execute("UPDATE por_v2_attempts SET state='failed_no_charge' WHERE request_id=?", (request_id,))
@@ -237,11 +270,8 @@ def confirm_saved(
             (attempt["app_name"], attempt["code_id"], logical_task_id),
         )
         return "failed_no_charge"
-    if not re.fullmatch(r"[0-9a-f]{64}", received_sha256) or not hmac.compare_digest(
-        _private_digest(received_sha256), attempt["output_sha256"]
-    ):
+    if not proof_matches:
         raise BillingStateError("saved result hash does not match provider output")
-    _id(receipt_id, "receipt_id")
     db.execute(
         "UPDATE por_v2_attempts SET state='awaiting_bill',receipt_sha256=? WHERE request_id=?",
         (_private_digest(hashlib.sha256(receipt_id.encode()).hexdigest()), request_id),
@@ -261,16 +291,27 @@ def attach_trusted_bill(
     if source not in ("ccg_verified", "versioned_tariff", "isolated_mock"):
         raise BillingStateError("untrusted billing source", 403)
     attempt = db.execute(
-        "SELECT state FROM por_v2_attempts WHERE request_id=?", (request_id,)
+        "SELECT * FROM por_v2_attempts WHERE request_id=?", (request_id,)
     ).fetchone()
-    if attempt is None or attempt["state"] != "awaiting_bill":
+    if attempt is None or attempt["state"] not in ("awaiting_bill", "billing_pending", "charged"):
         raise BillingStateError("attempt is not awaiting a bill")
     units = amount_units(cost_cny, points_per_cny, cost_rate)
+    _id(billed_model, "billed_model")
+    _id(bill_ref, "bill_ref")
+    if attempt["state"] in ("billing_pending", "charged"):
+        if (attempt["billed_model"] != billed_model or attempt["bill_ref"] != bill_ref
+                or attempt["cost_source"] != source or attempt["amount_units"] != units
+                or Decimal(attempt["cost_cny"]) != Decimal(cost_cny)):
+            raise BillingStateError("verified bill conflicts with an earlier bill")
+        return int(attempt["amount_units"])
     db.execute(
         """UPDATE por_v2_attempts SET state='billing_pending',billed_model=?,
                   bill_ref=?,cost_cny=?,cost_source=?,amount_units=? WHERE request_id=?""",
-        (_id(billed_model, "billed_model"), _id(bill_ref, "bill_ref"),
-         cost_cny, source, units, request_id),
+        (billed_model, bill_ref, cost_cny, source, units, request_id),
+    )
+    db.execute(
+        "UPDATE por_v2_tasks SET state='billing_pending' WHERE app_name=? AND code_id=? AND logical_task_id=?",
+        (attempt["app_name"], attempt["code_id"], attempt["logical_task_id"]),
     )
     return units
 
@@ -291,21 +332,32 @@ def settle(
         ).fetchone()
         if prior is None:
             raise BillingStateError("charged attempt has no ledger row", 500)
+        if prior["request_id"] != request_id or prior["amount_units"] != attempt["amount_units"]:
+            raise BillingStateError("charged attempt conflicts with its ledger row", 409)
         return {"idempotent": True, "remaining_units": prior["balance_after_units"],
                 "amount_units": prior["amount_units"]}
     result = central_consume(
         attempt["logical_task_id"], request_id, int(attempt["amount_units"]),
         attempt["billed_model"], attempt["bill_ref"], attempt["cost_cny"],
     )
-    if not result.get("ok") or type(result.get("remaining_units")) is not int:
+    if (not isinstance(result, dict) or result.get("ok") is not True
+            or type(result.get("remaining_units")) is not int or result["remaining_units"] < 0
+            or not isinstance(result.get("transaction_id"), str)
+            or not SAFE_ID.fullmatch(result["transaction_id"])):
         raise BillingStateError("central exact settlement was not confirmed", 503)
+    for name, expected in (("amount_units", int(attempt["amount_units"])),
+                           ("logical_task_id", attempt["logical_task_id"]),
+                           ("attempt_id", request_id)):
+        if name in result and (type(result[name]) is not type(expected) or result[name] != expected):
+            raise BillingStateError("central settlement conflicts with the verified charge", 503)
     db.execute("BEGIN IMMEDIATE")
     try:
         prior = db.execute(
-            "SELECT request_id,amount_units FROM por_v2_ledger WHERE app_name=? AND code_id=? AND logical_task_id=?",
+            "SELECT * FROM por_v2_ledger WHERE app_name=? AND code_id=? AND logical_task_id=?",
             (attempt["app_name"], attempt["code_id"], attempt["logical_task_id"]),
         ).fetchone()
-        if prior and (prior["request_id"] != request_id or prior["amount_units"] != attempt["amount_units"]):
+        if prior and (prior["request_id"] != request_id or prior["amount_units"] != attempt["amount_units"]
+                      or prior["central_transaction_id"] != result["transaction_id"]):
             raise BillingStateError("local logical task ledger conflicts with central settlement", 409)
         if prior is None:
             db.execute(
@@ -325,8 +377,8 @@ def settle(
     except Exception:
         db.execute("ROLLBACK")
         raise
-    return {"idempotent": bool(result.get("idempotent")),
-            "remaining_units": result["remaining_units"],
+    return {"idempotent": prior is not None or bool(result.get("idempotent")),
+            "remaining_units": prior["balance_after_units"] if prior is not None else result["remaining_units"],
             "amount_units": int(attempt["amount_units"])}
 
 

@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { createHash } from 'node:crypto'
 import type { ChatMessage, ModelTaskContext, ProjectTaskSnapshot } from '../../shared/types'
 import { runMaterialInsightWorkflow } from './materialInsightWorkflow'
 import type { MaterialInsightRow } from './materialInsights'
@@ -7,6 +8,85 @@ const priorWindow = globalThis.window
 afterEach(() => { (globalThis as { window: Window }).window = priorWindow })
 
 describe('material insight checkpoints', () => {
+  const sampleRows: MaterialInsightRow[] = [{
+    sourceId: 'source', sourceName: '素材.csv', sheetName: 'Sheet1', rowEvidenceId: 'R-1',
+    materialKey: 'M-1', product: '产品甲', attribution: '自有数据', platform: '视频号',
+    sellingPoint: 'Top1：安装方便', needScene: '下班回家安装'
+  }]
+
+  it('retries a saved extraction receipt after timeout without regenerating or changing its raw output hash', async () => {
+    const journal: Record<string, ProjectTaskSnapshot> = {}
+    const calls: Record<string, number> = {}
+    const charges = new Set<string>()
+    let loseReply = true
+    const confirm = vi.fn((receipt: { requestId: string; logicalTaskId: string; outputSha256: string }) => {
+      expect(journal[receipt.logicalTaskId]?.status).toBe('complete')
+      expect(receipt.outputSha256).toBe(createHash('sha256').update(journal[receipt.logicalTaskId].output!).digest('hex'))
+      charges.add(receipt.requestId)
+      if (loseReply) {
+        loseReply = false
+        return Promise.reject(new Error('confirmation reply lost'))
+      }
+      return Promise.resolve({ state: 'charged', chargedUnits: 1_000_000 })
+    })
+    const testWindow = { setTimeout, clearTimeout, api: {
+      confirmSavedModelResult: confirm,
+      sendChat: (messages: ChatMessage[], context: ModelTaskContext, handlers: Parameters<typeof window.api.sendChat>[2]) => {
+        calls[context.taskKey] = (calls[context.taskKey] || 0) + 1
+        const input = JSON.parse(messages[1].content as string) as Array<{ id: string }> | string[]
+        const output = context.taskKey.includes(':extract-')
+          ? { items: (input as Array<{ id: string }>).map(({ id }) => ({ id, phrases: [{ phrase: '安装方便', evidence: '安装方便' }] })) }
+          : { mappings: (input as string[]).map((raw) => ({ raw, keyword: raw })) }
+        const text = `\n${JSON.stringify(output)}\n`
+        queueMicrotask(() => handlers.onDone?.(text, context.taskKey, createHash('sha256').update(text).digest('hex')))
+        return { abort: () => undefined }
+      }
+    } }
+    ;(globalThis as unknown as { window: typeof testWindow }).window = testWindow
+    const run = () => runMaterialInsightWorkflow({
+      rows: sampleRows, selectedProducts: ['产品甲'], scopeLabel: '产品甲', sessionId: 'receipt-test',
+      sourceCount: 1, imageCount: 0, getTask: (id) => journal[id],
+      saveTask: (id, task) => { journal[id] = task; return Promise.resolve() },
+      setAbort: () => undefined, onProgress: () => undefined
+    })
+    await expect(run()).rejects.toThrow('confirmation reply lost')
+    const extractionId = Object.keys(calls)[0]
+    expect(journal[extractionId]).toMatchObject({ status: 'complete', billingAttemptId: extractionId })
+    expect((await run()).items[0].keyword).toBe('安装方便')
+    expect(calls[extractionId]).toBe(1)
+    expect(journal[extractionId].billingConfirmed).toBe(true)
+    expect(confirm).toHaveBeenCalledTimes(3)
+    expect(charges.size).toBe(2)
+  })
+
+  it('keeps cancellation active while saving a completed batch and does not start normalization after stop', async () => {
+    const journal: Record<string, ProjectTaskSnapshot> = {}
+    const abortCallbacks: Array<(() => void) | null> = []
+    let releaseSave!: () => void
+    const sendChat = vi.fn((messages: ChatMessage[], _context: ModelTaskContext, handlers: Parameters<typeof window.api.sendChat>[2]) => {
+      const input = JSON.parse(messages[1].content as string) as Array<{ id: string }>
+      queueMicrotask(() => handlers.onDone?.(JSON.stringify({ items: input.map(({ id }) => ({
+        id, phrases: [{ phrase: '安装方便', evidence: '安装方便' }]
+      })) })))
+      return { abort: () => undefined }
+    })
+    const testWindow = { setTimeout, clearTimeout, api: { sendChat } }
+    ;(globalThis as unknown as { window: typeof testWindow }).window = testWindow
+    const run = runMaterialInsightWorkflow({
+      rows: sampleRows, selectedProducts: ['产品甲'], scopeLabel: '产品甲', sessionId: 'stop-test',
+      sourceCount: 1, imageCount: 0, getTask: (id) => journal[id],
+      saveTask: (id, task) => { journal[id] = task; return new Promise((resolve) => { releaseSave = resolve }) },
+      setAbort: (fn) => abortCallbacks.push(fn), onProgress: () => undefined
+    })
+    await vi.waitFor(() => expect(releaseSave).toBeTypeOf('function'))
+    expect(abortCallbacks.at(-1)).toBeTypeOf('function')
+    abortCallbacks.at(-1)?.()
+    releaseSave()
+    await expect(run).rejects.toThrow('已停止')
+    expect(sendChat).toHaveBeenCalledTimes(1)
+    expect(abortCallbacks.at(-1)).toBeNull()
+  })
+
   it('resumes only the failed extraction batch without rerunning a completed batch', async () => {
     const rows: MaterialInsightRow[] = Array.from({ length: 45 }, (_, index) => ({
       sourceId: 'source', sourceName: '素材.csv', sheetName: 'Sheet1', rowEvidenceId: `R-${index + 1}`,

@@ -62,7 +62,7 @@ class ArkV2Tests(unittest.TestCase):
                     'input_tokens_details': {'cached_tokens': 0}, 'tool_usage': {'web_search': 2}}
                 if is_responses:
                     response = {'model': MANAGED_MODEL, 'usage': usage, 'output': [
-                        {'type': 'web_search_call', 'id': 'ws-1', 'action': {'query': 'brand'}},
+                        {'type': 'web_search_call', 'id': 'ws-1', 'status': 'completed', 'action': {'query': 'brand'}},
                         {'type': 'message', 'content': [{'type': 'output_text', 'text': 'OK', 'annotations': [
                             {'type': 'url_citation', 'url': 'https://example.com/brand', 'title': 'Brand'}]}]}]}
                     events = [{'type': 'response.output_text.delta', 'delta': 'OK'},
@@ -91,7 +91,7 @@ class ArkV2Tests(unittest.TestCase):
         self.anchor = sqlite3.connect(uri, uri=True)
 
         def connection():
-            db = sqlite3.connect(uri, uri=True)
+            db = sqlite3.connect(uri, uri=True, isolation_level=None)
             db.row_factory = sqlite3.Row
             return db
 
@@ -216,7 +216,7 @@ class ArkV2Tests(unittest.TestCase):
                 self.assertEqual(proxy.points_for_usage(MANAGED_MODEL, 3_000_000, 1_000_000, 1_000_000)[1], 43.2)
         for model in proxy.LEGACY_MODEL_ALIASES:
             expected = Decimal(str(proxy.MODEL_PRICES[model][0])) * 7_200_000 / 1_000_000
-            self.assertEqual(Decimal(proxy.v2_tariff_cost_cny(model, {'input_tokens': 1_000_000})), expected)
+            self.assertEqual(Decimal(proxy.v2_tariff_cost_cny(model, {'input_tokens': 1_000_000, 'output_tokens': 0})), expected)
 
     def test_tariff_hash_failure_blocks_debit_and_preserves_pending_result(self):
         _, request_id, logical_id = self.chat('source_clean')

@@ -150,7 +150,7 @@ async function requestProxyWallet(forceSession = false): Promise<PointsWalletSta
   const token = await getAiProxyToken(forceSession)
   const body = await jsonRequest(`${AI_PROXY_BASE_URL}/wallet`, {
     method: 'GET',
-    headers: { accept: 'application/json', authorization: `Bearer ${token}` }
+    headers: { accept: 'application/json', authorization: `Bearer ${token}`, 'x-result-confirmation-capable': '1' }
   })
   const wallet = parseWallet(body.wallet)
   cachedWallet = wallet

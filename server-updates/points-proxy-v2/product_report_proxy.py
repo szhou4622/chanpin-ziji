@@ -963,15 +963,20 @@ def search_event_details(event: dict[str, Any]) -> tuple[list[dict[str, str]], l
         calls.append({
             "callId": event_call_id,
             "query": text(event.get("query") or action.get("query"), 500),
+            "status": event_type.rsplit(".", 1)[-1],
         })
     for output_item in items:
         item_type = text(output_item.get("type"), 120)
         if "web_search" not in item_type and "search_call" not in item_type:
             continue
         item_action = output_item.get("action") if isinstance(output_item.get("action"), dict) else {}
+        call_id = text(output_item.get("id"), 200)
+        if not call_id:
+            continue
         calls.append({
-            "callId": text(output_item.get("id"), 200) or f"search-item-{len(calls) + 1}",
+            "callId": call_id,
             "query": text(output_item.get("query") or item_action.get("query"), 500),
+            "status": text(output_item.get("status"), 80),
         })
 
     choices = event.get("choices") if isinstance(event.get("choices"), list) else []
@@ -1012,6 +1017,7 @@ def search_event_details(event: dict[str, Any]) -> tuple[list[dict[str, str]], l
             calls.append({
                 "callId": text(tool_call.get("id"), 200) or f"tool-{len(calls) + 1}",
                 "query": query,
+                "status": "in_progress",
             })
 
     for container in containers[:24]:
@@ -1192,16 +1198,13 @@ def reserve_request(session: Session, request_id: str, report_id: str, task_key:
     reserve = math.ceil(reserve / 1000) * 1000
     with database() as db:
         ensure_schema(db)
+        ensure_v2_report_schema(db)
         db.execute("BEGIN IMMEDIATE")
         if db.execute("SELECT 1 FROM model_requests WHERE request_id=?", (request_id,)).fetchone():
             db.execute("ROLLBACK")
             raise ApiError(409, "检测到重复模型请求，已阻止重复扣费。")
         if task_type == "module_benchmark":
-            search_attempts = db.execute(
-                "SELECT COUNT(*) FROM model_requests WHERE app_name=? AND code_id=? "
-                "AND report_session_id=? AND task_type='module_benchmark' AND upstream_submitted=1",
-                (APP_NAME, session.code_id, report_id),
-            ).fetchone()[0]
+            search_attempts = report_search_attempts(db, session.code_id, report_id)
             if int(search_attempts) >= WEB_SEARCH_REPORT_LIMIT:
                 db.execute("ROLLBACK")
                 raise ApiError(429, "search_budget_exhausted：本报告的联网搜索预算已用完。")
@@ -1534,8 +1537,11 @@ def provider_usage(payload: dict[str, Any]) -> dict[str, Any] | None:
     def usage_integer(value: Any) -> int | None:
         return value if isinstance(value, int) and not isinstance(value, bool) else None
 
-    input_tokens = usage_integer(usage.get("prompt_tokens", usage.get("input_tokens", 0)))
-    output_tokens = usage_integer(usage.get("completion_tokens", usage.get("output_tokens", 0)))
+    input_tokens = usage_integer(usage.get("prompt_tokens", usage.get("input_tokens")))
+    output_tokens = usage_integer(usage.get("completion_tokens", usage.get("output_tokens")))
+    for chat_name, responses_name in (("prompt_tokens", "input_tokens"), ("completion_tokens", "output_tokens")):
+        if chat_name in usage and responses_name in usage and usage[chat_name] != usage[responses_name]:
+            return None
     cached_tokens = usage_integer(details.get("cached_tokens", usage.get("cached_input_tokens", 0)))
     created_tokens = usage_integer(usage.get("cache_creation_input_tokens", 0))
     if None in (input_tokens, output_tokens, cached_tokens, created_tokens):
@@ -1549,7 +1555,9 @@ def provider_usage(payload: dict[str, Any]) -> dict[str, Any] | None:
     }
     tool_usage = usage.get("tool_usage") if isinstance(usage.get("tool_usage"), dict) else {}
     search_calls = usage_integer(tool_usage.get("web_search", 0))
-    if "web_search" in tool_usage and search_calls is not None and 0 <= search_calls <= 1000:
+    if "web_search" in tool_usage:
+        if search_calls is None or not 0 <= search_calls <= 1000:
+            return None
         result["web_search_calls"] = search_calls
     if any(result[name] < 0 or result[name] > 2_000_000_000 for name in (
         "input_tokens", "output_tokens", "cached_input_tokens", "cache_creation_input_tokens"
@@ -1567,25 +1575,9 @@ def provider_usage(payload: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def merge_provider_usage(previous: dict[str, Any] | None, current: dict[str, Any] | None) -> dict[str, Any] | None:
-    if current is None:
-        return previous
-    if previous is None:
-        return current
-    input_tokens = max(previous["input_tokens"], current["input_tokens"])
-    cached = min(input_tokens, max(previous["cached_input_tokens"], current["cached_input_tokens"]))
-    created = min(
-        input_tokens - cached,
-        max(previous["cache_creation_input_tokens"], current["cache_creation_input_tokens"]),
-    )
-    return {
-        "input_tokens": input_tokens,
-        "output_tokens": max(previous["output_tokens"], current["output_tokens"]),
-        "cached_input_tokens": cached,
-        "cache_creation_input_tokens": created,
-        "response_model": current.get("response_model") or previous.get("response_model") or "",
-        **({"web_search_calls": max(previous.get("web_search_calls", 0), current.get("web_search_calls", 0))}
-           if "web_search_calls" in previous or "web_search_calls" in current else {}),
-    }
+    # Complete provider snapshots are authoritative; never invent a synthetic
+    # bill by combining maxima from unrelated/intermediate frames.
+    return current if current is not None else previous
 
 
 def provider_stream_items(upstream: Any, heartbeat_seconds: float = STREAM_HEARTBEAT_SECONDS):
@@ -1732,16 +1724,59 @@ def recover_interrupted_requests() -> None:
             db.execute("COMMIT")
 
 
+def ensure_v2_report_schema(db: sqlite3.Connection) -> None:
+    db.execute("""CREATE TABLE IF NOT EXISTS por_v2_report_attempts (
+        request_id TEXT PRIMARY KEY, app_name TEXT NOT NULL, code_id TEXT NOT NULL,
+        report_session_id TEXT NOT NULL, task_type TEXT NOT NULL,
+        started_at TEXT NOT NULL)""")
+    db.execute("""CREATE INDEX IF NOT EXISTS por_v2_report_search_idx
+        ON por_v2_report_attempts(app_name, code_id, report_session_id, task_type)""")
+
+
+def report_search_attempts(db: sqlite3.Connection, code_id: str, report_id: str) -> int:
+    legacy = db.execute(
+        """SELECT COUNT(*) FROM model_requests WHERE app_name=? AND code_id=?
+           AND report_session_id=? AND task_type='module_benchmark'
+           AND (upstream_submitted=1 OR status='running')""",
+        (APP_NAME, code_id, report_id),
+    ).fetchone()[0]
+    precise = db.execute(
+        """SELECT COUNT(*) FROM por_v2_report_attempts WHERE app_name=? AND code_id=?
+           AND report_session_id=? AND task_type='module_benchmark'""",
+        (APP_NAME, code_id, report_id),
+    ).fetchone()[0]
+    return int(legacy) + int(precise)
+
+
+def v2_required_units(row: sqlite3.Row) -> int:
+    required = max(row["reserved_units"], row["amount_units"])
+    if row["state"] in ("awaiting_receipt", "awaiting_bill", "receipt_expired_no_charge") and PRECISE_BILLING_SOURCE == "versioned_tariff":
+        try:
+            usage = json.loads(row["provider_usage_json"])
+        except (TypeError, ValueError) as error:
+            raise ApiError(409, "已有结果的实际用量不可核对，请先恢复或拒绝该结果。") from error
+        cost = v2_tariff_cost_cny(row["response_model"], usage)
+        required = max(required, billing_v2.amount_units(cost, str(POINTS_PER_CNY), str(COST_RATE)))
+    return required
+
+
+def v2_locked_units(db: sqlite3.Connection, code_id: str) -> int:
+    rows = db.execute(
+        """SELECT state,reserved_units,amount_units,response_model,provider_usage_json FROM por_v2_attempts
+           WHERE app_name=? AND code_id=?
+           AND state IN ('running','awaiting_receipt','awaiting_bill','billing_pending')""",
+        (APP_NAME, code_id),
+    ).fetchall()
+    return sum(v2_required_units(row) for row in rows)
+
+
 def v2_start_attempt(session: Session, logical_id: str, request_id: str,
                      task_key: str, task_type: str, model: str,
-                     input_estimate: int, redo_of: str = "") -> None:
+                     input_estimate: int, redo_of: str = "", report_id: str = "") -> None:
     if not PRECISE_INTERNAL_TOKEN or len(os.environ.get("POR_RESULT_PROOF_SECRET", "")) < 32:
         raise ApiError(503, "精确积分服务尚未完成安全配置。")
     # The central balance is authoritative; old wallet.milli fields are only a
     # compatibility display and must never decide the exact debit.
-    current = precise_license_balance(session)
-    if not session.unlimited and current["remaining_units"] <= 0:
-        raise ApiError(402, "积分不足，本次任务没有提交上游。")
     output_reserve = min(MAX_OUTPUT_TOKENS, TASK_OUTPUT_RESERVES.get(task_type, MAX_OUTPUT_TOKENS))
     reserve_milli, reserve_cost_cny = max(
         (points_for_usage(candidate, input_estimate, output_reserve) for candidate in ALLOWED_MODELS),
@@ -1750,9 +1785,20 @@ def v2_start_attempt(session: Session, logical_id: str, request_id: str,
     reserve_units = ((reserve_milli + 999) // 1000) * billing_v2.UNITS_PER_POINT
     with database() as db:
         billing_v2.ensure_schema(db)
+        ensure_v2_report_schema(db)
         db.execute("BEGIN IMMEDIATE")
         try:
+            # Read while holding the local admission/settlement lock so another
+            # settlement cannot clear its reservation after this balance snapshot.
+            current = precise_license_balance(session)
+            if not session.unlimited and current["remaining_units"] <= 0:
+                raise ApiError(402, "积分不足，本次任务没有提交上游。")
             billing_v2.expire_unconfirmed(db)
+            if task_type == "module_benchmark":
+                if not report_id:
+                    raise ApiError(400, "联网搜索缺少报告标识。")
+                if report_search_attempts(db, session.code_id, report_id) >= WEB_SEARCH_REPORT_LIMIT:
+                    raise ApiError(429, "search_budget_exhausted：本报告的联网搜索预算已用完。")
             running = db.execute(
                 "SELECT COUNT(*) FROM por_v2_attempts WHERE app_name=? AND code_id=? AND state='running'",
                 (APP_NAME, session.code_id),
@@ -1766,11 +1812,7 @@ def v2_start_attempt(session: Session, logical_id: str, request_id: str,
             ).fetchone()[0]
             if unconfirmed >= MAX_ACTIVE_PER_LICENSE:
                 raise ApiError(429, "已有结果等待保存确认或积分对账，请先恢复这些任务。")
-            locked_units = db.execute(
-                """SELECT COALESCE(SUM(reserved_units),0) FROM por_v2_attempts
-                   WHERE app_name=? AND code_id=? AND state='running'""",
-                (APP_NAME, session.code_id),
-            ).fetchone()[0]
+            locked_units = v2_locked_units(db, session.code_id)
             if not session.unlimited and current["remaining_units"] - locked_units < reserve_units:
                 raise ApiError(402, "积分不足以暂时预留本批次上限；尚未提交模型。")
             today_cost = db.execute(
@@ -1787,8 +1829,10 @@ def v2_start_attempt(session: Session, logical_id: str, request_id: str,
             if today_cost + legacy_today_cost + reserve_cost_cny > DAILY_COST_LIMIT_CNY:
                 raise ApiError(503, "今日模型费用已达到安全上限。")
             billing_v2.start_attempt(db, APP_NAME, session.code_id,
-                                     logical_id, task_key, task_type, request_id, model,
-                                     redo_of=redo_of, reserved_units=reserve_units)
+                                      logical_id, task_key, task_type, request_id, model,
+                                      redo_of=redo_of, reserved_units=reserve_units)
+            db.execute("INSERT INTO por_v2_report_attempts VALUES(?,?,?,?,?,?)",
+                       (request_id, APP_NAME, session.code_id, report_id, task_type, utc_now()))
             db.execute("COMMIT")
         except billing_v2.BillingStateError as error:
             db.execute("ROLLBACK")
@@ -1840,14 +1884,19 @@ def v2_tariff_cost_cny(model: str, usage: dict[str, Any]) -> str:
     models = as_object(tariff.get("models"))
     if model not in models or not isinstance(models[model], list) or len(models[model]) != 4:
         raise ApiError(409, "实际计费模型不在已批准价目表中，本次进入待对账。")
-    input_tokens = max(0, int(usage.get("input_tokens", 0)))
-    output_tokens = max(0, int(usage.get("output_tokens", 0)))
-    cached = max(0, int(usage.get("cached_input_tokens", 0)))
-    created = max(0, int(usage.get("cache_creation_input_tokens", 0)))
+    if not isinstance(usage, dict) or any(type(usage.get(key)) is not int or usage[key] < 0
+            for key in ("input_tokens", "output_tokens")):
+        raise ApiError(409, "上游缺少完整的实际 Token 用量，本次进入待对账。")
+    input_tokens = usage["input_tokens"]
+    output_tokens = usage["output_tokens"]
+    cached = usage.get("cached_input_tokens", 0)
+    created = usage.get("cache_creation_input_tokens", 0)
+    if any(type(value) is not int or value < 0 for value in (cached, created)):
+        raise ApiError(409, "上游 Token 明细无效，本次进入待对账。")
     if cached + created > input_tokens:
         raise ApiError(409, "上游 Token 明细不一致，本次进入待对账。")
     prices = tuple(Decimal(str(value)) for value in models[model])
-    if any(value < 0 for value in prices):
+    if any(not value.is_finite() or value < 0 for value in prices):
         raise ApiError(503, "价目表存在无效价格，本次进入待对账。")
     usd = ((input_tokens - cached - created) * prices[0] +
            output_tokens * prices[1] + cached * prices[2] + created * prices[3]) / Decimal(1_000_000)
@@ -1862,7 +1911,8 @@ def v2_confirm_saved(session: Session, request_id: str, logical_id: str,
         db.execute("BEGIN IMMEDIATE")
         try:
             row = db.execute(
-                """SELECT a.code_id,a.requested_model,a.response_model,a.provider_usage_json,t.task_type
+                """SELECT a.code_id,a.requested_model,a.response_model,a.provider_usage_json,
+                          a.state,a.reserved_units,a.amount_units,t.task_type
                    FROM por_v2_attempts a JOIN por_v2_tasks t
                    ON t.app_name=a.app_name AND t.code_id=a.code_id
                      AND t.logical_task_id=a.logical_task_id WHERE a.request_id=?""",
@@ -1870,6 +1920,11 @@ def v2_confirm_saved(session: Session, request_id: str, logical_id: str,
             ).fetchone()
             if row is None or row["code_id"] != session.code_id:
                 raise ApiError(404, "模型尝试记录不存在。")
+            if row["state"] == "receipt_expired_no_charge" and locally_valid and not session.unlimited:
+                current = precise_license_balance(session)
+                required = v2_required_units(row)
+                if current["remaining_units"] - v2_locked_units(db, session.code_id) < required:
+                    raise ApiError(402, "余额已被其他任务预留，请先完成这些任务后再确认此结果。")
             state = billing_v2.confirm_saved(db, request_id, logical_id,
                                              result_sha256, receipt_id, locally_valid)
             db.execute("COMMIT")
@@ -1916,6 +1971,9 @@ def v2_confirm_saved(session: Session, request_id: str, logical_id: str,
                 bill_ref, "versioned_tariff", str(POINTS_PER_CNY), str(COST_RATE),
             )
             db.execute("COMMIT")
+        except billing_v2.BillingStateError as error:
+            db.execute("ROLLBACK")
+            raise ApiError(error.status, str(error)) from error
         except Exception:
             db.execute("ROLLBACK")
             raise
@@ -2156,7 +2214,7 @@ class Handler(BaseHTTPRequestHandler):
         if precise_request:
             v2_start_attempt(session, billing_request_id, request_id,
                              task_key, task_type, model, input_estimate,
-                             text(self.headers.get("x-manual-redo-of"), 240))
+                             text(self.headers.get("x-manual-redo-of"), 240), report_id=report_id)
         else:
             reserve_request(
                 session, request_id, report_id, task_key, task_type, model, attempt,
@@ -2165,8 +2223,11 @@ class Handler(BaseHTTPRequestHandler):
         upstream_data = json.dumps(upstream_body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         if not precise_request:
             mark_upstream_submitted(request_id)
-        usage: dict[str, int] | None = None
+        usage: dict[str, Any] | None = None
+        final_usage_valid = False
+        stream_error = False
         search_call_ids: set[str] = set()
+        search_call_states: dict[str, str] = {}
         search_queries: dict[str, str] = {}
         search_evidence: dict[str, dict[str, str]] = {}
         search_metadata_sent = False
@@ -2182,7 +2243,9 @@ class Handler(BaseHTTPRequestHandler):
             if task_type != "module_benchmark" or search_metadata_sent or not client_open:
                 return
             search_metadata_sent = True
-            verified = bool(search_call_ids and search_evidence)
+            successful_calls = {call_id for call_id, state in search_call_states.items() if state == "completed"}
+            verified = bool(not stream_error and final_usage_valid and successful_calls and search_evidence
+                            and (usage or {}).get("web_search_calls", 1) > 0)
             status = "verified" if verified else "attempted" if search_call_ids else "unavailable"
             call_ids = sorted(search_call_ids)
             status_payload = {
@@ -2193,7 +2256,7 @@ class Handler(BaseHTTPRequestHandler):
             }
             payloads: list[dict[str, Any]] = [status_payload]
             if verified:
-                fallback_call_id = call_ids[0]
+                fallback_call_id = sorted(successful_calls)[0]
                 for evidence_item in search_evidence.values():
                     payloads.append({
                         "type": "por.search_evidence",
@@ -2260,15 +2323,36 @@ class Handler(BaseHTTPRequestHandler):
                             try:
                                 event = as_object(json.loads(data.decode("utf-8", "replace")))
                                 event_type = text(event.get("type"), 120)
+                                response = event.get("response") if isinstance(event.get("response"), dict) else {}
+                                if event.get("error") or event_type in ("error", "response.failed", "response.incomplete"):
+                                    stream_error = True
+                                if event_type == "response.completed" and response.get("status", "completed") != "completed":
+                                    stream_error = True
                                 if event_type in ("por.search_status", "por.search_evidence"):
                                     # Only this proxy may emit trusted internal metadata events.
                                     forward_raw_line = False
-                                usage = merge_provider_usage(usage, provider_usage(event))
+                                choices = event.get("choices")
+                                previous_finish = finish_reason
+                                stopped_here = isinstance(choices, list) and any(
+                                    isinstance(choice, dict) and choice.get("finish_reason") == "stop" for choice in choices)
+                                has_usage = (event.get("usage") is not None or response.get("usage") is not None
+                                             or (not uses_responses_api and choices == [] and "usage" in event))
+                                if has_usage:
+                                    # A supplied malformed snapshot must invalidate an older valid one.
+                                    usage = provider_usage(event)
+                                    final_usage_valid = bool(usage and (
+                                        event_type == "response.completed" if uses_responses_api
+                                        else stopped_here or finish_reason == "stop"))
+                                elif uses_responses_api and event_type == "response.completed":
+                                    usage = None
+                                    final_usage_valid = False
                                 if task_type == "module_benchmark":
                                     calls, evidence_items = search_event_details(event)
                                     for call in calls:
                                         call_id = call["callId"]
                                         search_call_ids.add(call_id)
+                                        if call.get("status"):
+                                            search_call_states[call_id] = call["status"]
                                         if call.get("query"):
                                             search_queries[call_id] = call["query"]
                                     for evidence_item in evidence_items:
@@ -2276,11 +2360,18 @@ class Handler(BaseHTTPRequestHandler):
                                 if uses_responses_api:
                                     response_delta = ""
                                     if event_type == "response.output_text.delta":
-                                        response_delta = text(event.get("delta"), 2_000_000)
+                                        response_delta = event.get("delta")
+                                        if not isinstance(response_delta, str) or len(response_delta) > MAX_TEXT_CHARS:
+                                            raise ApiError(502, "模型流式文本格式或长度无效。")
+                                        if previous_finish and response_delta:
+                                            stream_error = True
                                     elif event_type == "response.completed":
                                         finish_reason = "stop"
+                                        final_text = responses_output_text(response)
+                                        if precise_request and sent_content and final_text and final_text != "".join(v2_chunks):
+                                            stream_error = True
                                         if not sent_content:
-                                            response_delta = responses_output_text(event.get("response"))
+                                            response_delta = final_text
                                     elif event_type in ("response.failed", "response.incomplete", "error"):
                                         finish_reason = "error"
                                         error = event.get("error") if isinstance(event.get("error"), dict) else {}
@@ -2293,12 +2384,13 @@ class Handler(BaseHTTPRequestHandler):
                                             except (BrokenPipeError, ConnectionResetError, OSError):
                                                 client_open = False
                                     if response_delta:
+                                        if output_chars + len(response_delta) > MAX_TEXT_CHARS:
+                                            raise ApiError(502, "模型输出超过长度限制。")
                                         output_chars += len(response_delta)
                                         sent_content = True
                                         if precise_request:
                                             v2_chunks.append(response_delta)
                                         send_chat_delta(response_delta)
-                                choices = event.get("choices")
                                 if isinstance(choices, list):
                                     for choice in choices:
                                         if isinstance(choice, dict) and choice.get("finish_reason") is not None:
@@ -2306,12 +2398,17 @@ class Handler(BaseHTTPRequestHandler):
                                         delta = choice.get("delta", {}) if isinstance(choice, dict) else {}
                                         content = delta.get("content") if isinstance(delta, dict) else None
                                         if isinstance(content, str) and content:
+                                            if previous_finish:
+                                                stream_error = True
+                                            if output_chars + len(content) > MAX_TEXT_CHARS:
+                                                raise ApiError(502, "模型输出超过长度限制。")
                                             output_chars += len(content)
                                             sent_content = True
                                             if precise_request:
                                                 v2_chunks.append(content)
                             except Exception:
-                                pass
+                                stream_error = True
+                                forward_raw_line = False
                     if raw_line.startswith(b"data:") and raw_line[5:].strip() == b"[DONE]":
                         send_search_metadata()
                     if client_open and forward_raw_line:
@@ -2321,6 +2418,7 @@ class Handler(BaseHTTPRequestHandler):
                         except (BrokenPipeError, ConnectionResetError, OSError):
                             client_open = False
             except HTTPError as error:
+                stream_error = True
                 error.read(16 * 1024)
                 message = (
                     f"provider_route_unavailable：模型线路暂时不可用（{error.code}）"
@@ -2335,6 +2433,7 @@ class Handler(BaseHTTPRequestHandler):
                     except (BrokenPipeError, ConnectionResetError, OSError):
                         client_open = False
             except (URLError, TimeoutError, OSError):
+                stream_error = True
                 if client_open:
                     payload = json.dumps(
                         {"error": {"message": "provider_route_unavailable：模型线路连接失败。"}},
@@ -2345,8 +2444,8 @@ class Handler(BaseHTTPRequestHandler):
                         self.wfile.flush()
                     except (BrokenPipeError, ConnectionResetError, OSError):
                         client_open = False
-            completed = (bool(sent_content and finish_reason == "stop") if uses_responses_api
-                         else provider_stream_completed(saw_done, finish_reason, usage, sent_content))
+            completed = (not stream_error and (bool(sent_content and finish_reason == "stop") if uses_responses_api
+                         else provider_stream_completed(saw_done, finish_reason, usage, sent_content)))
             send_search_metadata()
             if completed and not saw_done and client_open and not precise_request:
                 try:
@@ -2365,7 +2464,7 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             search_calls = max(len(search_call_ids), (usage or {}).get("web_search_calls", 0)) if task_type == "module_benchmark" else 0
             if precise_request:
-                v2_state = v2_finish_attempt(request_id, final_status == "success" and client_open,
+                v2_state = v2_finish_attempt(request_id, final_status == "success" and client_open and final_usage_valid,
                                              "".join(v2_chunks),
                                              text(usage.get("response_model"), 200) if usage else "", usage)
                 if final_status == "success" and v2_state == "awaiting_receipt" and client_open:

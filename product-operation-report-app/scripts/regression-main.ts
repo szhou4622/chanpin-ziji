@@ -182,9 +182,18 @@ async function testProjectRevisionAndBackup(): Promise<void> {
   writeFileSync(join(tempUserData, 'last-project.json.bak'), JSON.stringify(snapshot(5, '更新备份')), 'utf8')
   assert.equal((await loadLastProject())?.revision, 5)
   assert.equal((await loadLastProject())?.reportMarkdown, '更新备份')
-  const billingSnapshot = { ...snapshot(6, 'billing-id'), analysisSessionId: 'stable-billing-session' }
+  const billingSnapshot: SavedProject = {
+    ...snapshot(6, 'billing-id'), analysisSessionId: 'stable-billing-session', taskJournal: {
+      'stable-billing-session:module:v2:product-info': {
+        kind: 'module', status: 'complete', output: 'retained historical output', outputInvalidated: true,
+        billingAttemptId: 'retained-attempt', billingOutputSha256: 'a'.repeat(64), updatedAt: '2026-10-12T00:00:00Z'
+      }
+    }
+  }
   await saveLastProject(billingSnapshot)
   assert.equal((await loadLastProject())?.analysisSessionId, 'stable-billing-session', 'crash recovery preserves stable billing ids')
+  assert.equal((await loadLastProject())?.taskJournal?.['stable-billing-session:module:v2:product-info']?.outputInvalidated, true,
+    'obsolete business output retains its billing proof without becoming reusable after restart')
   const migratedSnapshot: SavedProject = {
     ...snapshot(7, '# 产品内容策略报告'),
     engineVersion: 'v2',
@@ -1146,6 +1155,8 @@ async function testProxyWalletBridge(): Promise<void> {
       }
       if (url.endsWith('/wallet')) {
         assert.equal(new Headers(init?.headers).get('authorization'), `Bearer proxy-token-${sessionCount}`)
+        assert.equal(new Headers(init?.headers).get('x-result-confirmation-capable'), '1',
+          'wallet reads must use the same V2 ledger and pending-settlement retry path as model requests')
         return new Response(JSON.stringify({
           ok: true,
           wallet: {
@@ -1154,7 +1165,7 @@ async function testProxyWalletBridge(): Promise<void> {
             totalTopupPoints: 250,
             totalCostPoints: 49,
             totalChargedPoints: 49,
-            unbilledUsageCount: 0,
+            unbilledUsageCount: 2,
             pricing: {
               model: 'gpt-5.5', currency: 'USD', inputUsdPerMillion: 1.25,
               outputUsdPerMillion: 7.5, cachedInputUsdPerMillion: 0.125,
@@ -1174,12 +1185,16 @@ async function testProxyWalletBridge(): Promise<void> {
     assert.equal((await activateWithCode(code)).ok, true)
     const wallet = await fetchProxyWallet()
     assert.equal(wallet.balancePoints, 201)
+    assert.equal(wallet.totalChargedPoints, 49)
+    assert.equal(wallet.unbilledUsageCount, 2, 'pending V2 settlements survive the wallet bridge')
     assert.equal(wallet.ledger[0]?.description, '资料清洗')
     assert.equal(wallet.ledger[0]?.reportSessionId, 'report-ledger')
 
     globalThis.fetch = (async () => { throw new TypeError('network unavailable') }) as typeof fetch
     const stale = await fetchProxyWallet()
     assert.equal(stale.balancePoints, 201)
+    assert.equal(stale.totalChargedPoints, 49)
+    assert.equal(stale.unbilledUsageCount, 2)
     assert.equal(stale.stale, true)
     assert.match(stale.warning || '', /network unavailable/u)
   } finally {

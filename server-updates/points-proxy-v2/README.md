@@ -4,7 +4,7 @@
 `doubao-seed-2-1-pro-260915`。不要用 legacy 的 `points-proxy-v1` 覆盖正式服务。
 
 原正式代理 SHA256：`460ce2d6c5c3984a0e339a2451fc0536bc2b0289b53e9683e4d8a2d4aa5039c4`。
-`por_billing_v2.py` 和 `provider_keyring.py` 保留服务器原实现。
+`provider_keyring.py` 保留服务器原实现；`por_billing_v2.py` 在原账本结构上补齐了下面的并发与恢复边界。
 
 - 所有新模型任务实际调用方舟豆包 2.1 Pro。已有安装包发送的五个旧模型名称仅作为兼容别名，服务器在验证时转为豆包，不再请求旧供应商。
 - 普通任务使用 Chat API。清洗、摘要关闭思考；分析任务开启思考。输出及思维链共同受 `max_completion_tokens` 限制。
@@ -14,7 +14,18 @@
 - 旧模型价格只用于历史待结算记录，按原固定 7.2 汇率转换后保留；不会重新收费或追收历史任务。V2 仍按原合同仅向用户收取模型 Token 费用，搜索资源费由平台承担。
 - Key 仅保存在服务器 `/etc/product-operation-report/provider-keys.json`。不要写入仓库、客户端或安装包。
 
-部署前运行 `python -B -m unittest -v test_ark_v2.py`，验证真实回环 HTTP、全部任务、旧模型别名、结果确认、重复确认和中断零扣费。
+部署前运行 `python -B -m unittest discover -p 'test_*.py'`，验证真实回环 HTTP、全部任务、旧模型别名、结果确认、重复确认、中断零扣费及对抗性边界。
 部署必须备份正式代码、Key 配置和计费环境；升级代码与价目表后重启正式服务，验证公网健康、真实模型调用和精确积分确认。
+
+## 审查修复
+
+- 完整结果在等待回执、等待账单、结算重试期间继续占用余额。合法实际用量高于预估时按实际费用保护余额；过期回执恢复也重新执行余额准入。没有提前扣费或重算历史已结算金额。
+- 并发合法确认复用相同账单和中央交易；冲突证明拒绝。旧失败身份、迟到回执不能覆盖新尝试。
+- Responses 文本片段保留原始空白；明确失败事件不能被后续完成事件覆盖。终局用量缺失、矛盾、为 null 或出现在完成前时，不生成可扣费凭证。终局全文与已发片段不一致时也拒绝完成。
+- 搜索只把成功完成的调用和有效引用作为可信证据；明确零次搜索不会标记已验证。新增 `por_v2_report_attempts` 记录本次升级后的 V2 报告准入，和原 legacy 已提交/正在运行的搜索共同执行每报告上限。原 V2 没有保存报告 ID，既有记录不猜测补录。
+- 客户端钱包显式启用 V2；完整结果的保存/确认失败保留原证明用于恢复。业务资料变更时，旧证明与当前业务输出分开处理。停止操作覆盖并发调用与重试等待。
+
+现有 V2 服务器使用 `deploy_review_fixes.py --check-only` 预检，确认基线匹配后运行 `deploy_review_fixes.py`。
+该脚本仅替换代理和计费状态机两份代码；短时暂停新业务请求并等待旧请求退出，保留健康检查。它备份原代码、Nginx 和数据库快照，失败恢复代码和 Nginx，**不会回滚数据库、用户余额、Key 或价目表**。临时部署包应在验证后清理，审计备份保留。
 
 接口及计价来源：[官方模型价格](https://docs.volcengine.com/docs/ark/model-pricing?lang=en&redirect=1)、[深度思考](https://docs.volcengine.com/docs/ark/deep-thinking?lang=en)、[联网搜索](https://docs.volcengine.com/docs/ark/web-search?lang=en)。
