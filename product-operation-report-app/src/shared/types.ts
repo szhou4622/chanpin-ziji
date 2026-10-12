@@ -533,6 +533,7 @@ export interface MaterialSellingPointItem {
 
 export interface MaterialSellingPointInsight {
   version: 1
+  sourceScope?: 'own'
   fingerprint: string
   scopeLabel: string
   totalMaterials: number

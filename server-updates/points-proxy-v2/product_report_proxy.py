@@ -87,24 +87,28 @@ MAX_MESSAGES = 64
 MAX_TEXT_CHARS = 2_000_000
 MAX_IMAGE_BYTES = 16 * 1024 * 1024
 MAX_ACTIVE_PER_LICENSE = 4
-MAX_OUTPUT_TOKENS = max(1024, min(32768, int(os.environ.get("POR_MAX_OUTPUT_TOKENS", "12000"))))
+MAX_OUTPUT_TOKENS = max(1024, min(32768, int(os.environ.get("POR_MAX_OUTPUT_TOKENS", "16000"))))
 TASK_OUTPUT_RESERVES = {
     # The same bounded budget is reserved and forwarded to Ark. Semantic
     # cleaning of full evidence batches routinely exceeds the old 2,500 cap.
-    "source_clean": MAX_OUTPUT_TOKENS,
+    "source_clean": 12_000,
     "summary": 3_500,
-    "analysis_step": 4_000,
+    "analysis_step": 12_000,
     "final_part": MAX_OUTPUT_TOKENS,
     "revision_part": MAX_OUTPUT_TOKENS,
-    "module_product_info": 5000,
-    "module_platform_audience": 8000,
-    "module_material_review": 10000,
-    "module_benchmark": 5000,
-    "module_selling_points": 7000,
-    "module_voc": 10000,
-    "module_ranking": 10000,
-    "module_audience_sp_scene": 10000,
+    "module_product_info": 8_000,
+    "module_platform_audience": 16_000,
+    "module_material_review": 16_000,
+    "module_benchmark": 16_000,
+    "module_selling_points": 16_000,
+    "module_voc": 16_000,
+    "module_ranking": 16_000,
+    "module_audience_sp_scene": 16_000,
 }
+MATERIAL_INSIGHT_TASK_KEY_RE = re.compile(
+    r"^[A-Za-z0-9_.-]+:material-insight:v1:[a-f0-9]{8}-[0-9]+-[0-9]+:"
+    r"(?:extract-[0-9]{4,}|normalize-[0-9]+-[0-9]+)$"
+)
 STREAM_HEARTBEAT_SECONDS = 20.0
 REQUEST_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}(?::fallback:[1-3])?$", re.I)
 SAFE_TEXT_RE = re.compile(r"^[\w.:-]{1,200}$", re.UNICODE)
@@ -1069,9 +1073,10 @@ def responses_request_body(chat_body: dict[str, Any]) -> dict[str, Any]:
         "instructions": "\n\n".join(instructions),
         "input": input_items,
         "stream": True,
-        "max_output_tokens": chat_body.get("max_completion_tokens", 5000),
+        "max_output_tokens": chat_body.get("max_completion_tokens",
+                                           min(MAX_OUTPUT_TOKENS, TASK_OUTPUT_RESERVES["module_benchmark"])),
         "thinking": {"type": "enabled"},
-        "reasoning": {"effort": "high"},
+        "reasoning": {"effort": "low"},
         "store": False,
         "tools": [{
             "type": "web_search",
@@ -1661,13 +1666,21 @@ def provider_stream_completed(saw_done: bool, finish_reason: str, usage: dict[st
     return bool(sent_content and finish_reason in ("", "stop") and (saw_done or finish_reason == "stop"))
 
 
-def apply_server_task_options(upstream_body: dict[str, Any], task_type: str) -> None:
+def apply_server_task_options(upstream_body: dict[str, Any], task_type: str, task_key: str = "") -> None:
     # Only forward Ark-supported options. Client cache hints remain local.
     upstream_body.pop("prompt_cache_key", None)
     upstream_body.pop("reasoning_effort", None)
+    upstream_body.pop("reasoning", None)
     # Ark max_completion_tokens caps answer AND thinking tokens. max_tokens
     # caps only the answer and therefore cannot enforce the reserved budget.
-    upstream_body["thinking"] = {"type": "disabled" if task_type in ("source_clean", "summary") else "enabled"}
+    # Seed 2.1 defaults to high effort, which can consume the whole completion
+    # budget before any answer. Extraction stays direct; analysis uses a fixed
+    # server-owned low effort. Never inherit arbitrary client reasoning options.
+    direct_extraction = task_type in ("source_clean", "summary", "module_product_info") or (
+        task_type == "module_selling_points" and bool(MATERIAL_INSIGHT_TASK_KEY_RE.fullmatch(task_key)))
+    upstream_body["thinking"] = {"type": "disabled" if direct_extraction else "enabled"}
+    if not direct_extraction:
+        upstream_body["reasoning_effort"] = "low"
     if task_type == "module_benchmark":
         upstream_body["tools"] = [{"type": "web_search", "max_keyword": 2, "limit": 10}]
         upstream_body["tool_choice"] = "required"
@@ -2205,10 +2218,8 @@ class Handler(BaseHTTPRequestHandler):
             upstream_body["prompt_cache_key"] = prompt_cache_key
         if temperature is not None:
             upstream_body["temperature"] = float(temperature)
-        if task_type in ("source_clean", "summary") and body.get("reasoning_effort") == "low":
-            upstream_body["reasoning_effort"] = "low"
-        # The server, not the untrusted client, decides which task may search.
-        apply_server_task_options(upstream_body, task_type)
+        # The server owns search, thinking, and the total completion budget.
+        apply_server_task_options(upstream_body, task_type, task_key)
         uses_responses_api = task_type == "module_benchmark"
         if uses_responses_api:
             upstream_body = responses_request_body(upstream_body)

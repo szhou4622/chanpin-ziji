@@ -16,6 +16,7 @@ import type {
   SourceKindV1,
   ModuleKey,
   ModuleRunState,
+  MaterialSellingPointInsight,
   ReportEngineVersion
 } from '../../shared/types'
 import { REPORT_MODULES, REPORT_MODULES_V2, SOP_STEPS } from '../../shared/types'
@@ -58,7 +59,7 @@ import {
   validateModuleOutput
 } from './modules'
 import { inferSourcePlatform } from './sourceMetadata'
-import { buildSceneCatalog, materialInsightFingerprint, readMaterialInsightRows, selectMaterialInsightScope, validateSceneSelection } from './materialInsights'
+import { buildSceneCatalog, computeSellingPointInsight, materialInsightFingerprint, readMaterialInsightRows, readOwnMaterialInsightRows, selectMaterialInsightScope, selectOwnMaterialInsightScope, validateSceneSelection } from './materialInsights'
 import { materialInsightTaskPrefix, readMaterialInsightResult, runMaterialInsightWorkflow } from './materialInsightWorkflow'
 
 export { friendlyError } from './store/errors'
@@ -272,9 +273,25 @@ function hasCompleteReportSections(markdown: string): boolean {
   return legacy || v1 || v2
 }
 
-function validReportCacheSnapshot(snapshot: ReportResultCacheSnapshot | undefined): snapshot is ReportResultCacheSnapshot {
+function compatibleCachedInsight(snapshot: ReportResultCacheSnapshot, state: Pick<StoreState, 'sources' | 'selectedMaterialProducts'>): MaterialSellingPointInsight | null {
+  const insight = snapshot.materialInsight
+  if (insight?.version === 1 && insight.sourceScope === 'own') return insight
+  // Empty legacy clouds carry no competitor content. Rebuild their own-material
+  // denominator locally when there is no selling-point input to send to a model.
+  if (insight && (insight.version !== 1 || insight.totalMaterials !== 0 || insight.effectiveMaterials !== 0 ||
+    insight.normalizedCount !== 0 || insight.items.length !== 0 || insight.mappings.length !== 0)) return null
+  const errors: string[] = []
+  const rows = readOwnMaterialInsightRows(state.sources, errors)
+  if (errors.length || rows.some((row) => row.sellingPoint.trim())) return null
+  const scope = selectOwnMaterialInsightScope(rows, state.selectedMaterialProducts)
+  if (scope.needsSelection) return null
+  return computeSellingPointInsight({ rows: scope.rows, scopeLabel: scope.label,
+    fingerprint: materialInsightFingerprint(scope.rows, scope.selectedProducts), candidates: [], normalization: {} })
+}
+
+function validReportCacheSnapshot(snapshot: ReportResultCacheSnapshot | undefined, state: Pick<StoreState, 'sources' | 'selectedMaterialProducts'>): snapshot is ReportResultCacheSnapshot {
   if (!snapshot?.cleanedData.trim() || !snapshot.reportMarkdown.trim()) return false
-  if (!snapshot.materialInsight || snapshot.materialInsight.version !== 1) return false
+  if (!compatibleCachedInsight(snapshot, state)) return false
   if (!hasCompleteReportSections(snapshot.reportMarkdown)) return false
   return REPORT_MODULES.every((module) => snapshot.artifacts[module.id]?.trim()) && Boolean(snapshot.artifacts[REPORT_STEP_ID]?.trim())
 }
@@ -288,7 +305,7 @@ function snapshotForReportCache(state: StoreState): ReportResultCacheSnapshot | 
     return detail ? [{ name: source.name, text: detail.text }] : []
   })
   if (cleanDetails.length !== state.sources.filter(sourceHasContent).length) return null
-  const scope = selectMaterialInsightScope(readMaterialInsightRows(state.sources), state.selectedMaterialProducts)
+  const scope = selectOwnMaterialInsightScope(readMaterialInsightRows(state.sources), state.selectedMaterialProducts)
   if (scope.needsSelection) return null
   const insight = readMaterialInsightResult(state.taskJournal, state.analysisSessionId,
     materialInsightFingerprint(scope.rows, scope.selectedProducts))
@@ -1986,7 +2003,7 @@ export const useStore = create<StoreState>((set, get) => ({
     }
     try {
       const cached = await window.api.lookupReportResultCache(reportResultCacheInput(sources, get().steering, get().selectedMaterialProducts))
-      if (cached.hit && validReportCacheSnapshot(cached.snapshot)) {
+      if (cached.hit && validReportCacheSnapshot(cached.snapshot, get())) {
         set({ reportReuseOffer: cached })
         return
       }
@@ -1998,7 +2015,7 @@ export const useStore = create<StoreState>((set, get) => ({
 
   acceptReportReuse: async () => {
     const offer = get().reportReuseOffer
-    if (!offer || !validReportCacheSnapshot(offer.snapshot)) {
+    if (!offer || !validReportCacheSnapshot(offer.snapshot, get())) {
       set({ reportReuseOffer: null })
       get()._post('assistant', '上次报告缓存已失效，将按正常流程重新生成。', 'narration')
       await get()._startPaidGeneration()
@@ -2015,7 +2032,7 @@ export const useStore = create<StoreState>((set, get) => ({
       return
     }
     const sessionId = get().analysisSessionId
-    const cachedInsight = offer.snapshot.materialInsight!
+    const cachedInsight = compatibleCachedInsight(offer.snapshot, get())!
     const insightTaskId = `${materialInsightTaskPrefix(sessionId, cachedInsight.fingerprint)}:final`
     set({
       reportReuseOffer: null,
@@ -2685,6 +2702,9 @@ export const useStore = create<StoreState>((set, get) => ({
     }
     const sceneRows = materialRows.filter((row) => materialScope.selectedProducts.includes(row.product) || /竞品|竞对/u.test(row.attribution))
     const sceneCatalog = materialScanErrors.length ? [] : buildSceneCatalog(sceneRows)
+    const ownMaterialScanErrors: string[] = []
+    readOwnMaterialInsightRows(analysisSources, ownMaterialScanErrors)
+    const ownMaterialScope = selectOwnMaterialInsightScope(materialRows, get().selectedMaterialProducts)
     const sufficiency = evaluateSourceSufficiency(REPORT_MODULES, analysisSources.map((source) => source.kindV1))
     if (sufficiency.blocked) {
       set({ phase: 'checkpoint1', abortFn: null })
@@ -2979,11 +2999,11 @@ export const useStore = create<StoreState>((set, get) => ({
         if (!isCurrentSession() || aborts.aborted || get().phase !== 'analyzing') break
         if (wave === 2) {
           try {
-            if (materialScanErrors.length) throw new Error(`素材卖点表有 ${materialScanErrors.length} 个解析错误，无法保证词云覆盖完整。`)
+            if (ownMaterialScanErrors.length) throw new Error(`自有素材卖点表有 ${ownMaterialScanErrors.length} 个解析错误，无法保证词云覆盖完整。`)
             const insight = await runMaterialInsightWorkflow({
-              rows: materialScope.rows,
-              selectedProducts: materialScope.selectedProducts,
-              scopeLabel: materialScope.label,
+              rows: ownMaterialScope.rows,
+              selectedProducts: ownMaterialScope.selectedProducts,
+              scopeLabel: ownMaterialScope.label,
               sessionId,
               sourceCount: sourceCountV1,
               imageCount: imageCountV1,
@@ -2999,7 +3019,7 @@ export const useStore = create<StoreState>((set, get) => ({
             if (isCurrentSession()) get()._post('assistant', `素材卖点统计已完成：${insight.effectiveMaterials}/${insight.totalMaterials} 份素材提取到有效卖点，展示 ${insight.items.length} 个。`, 'narration')
           } catch (error) {
             if (!isCurrentSession()) return
-            const rowsFingerprint = materialInsightFingerprint(materialScope.rows, materialScope.selectedProducts)
+            const rowsFingerprint = materialInsightFingerprint(ownMaterialScope.rows, ownMaterialScope.selectedProducts)
             const failureId = `${materialInsightTaskPrefix(sessionId, rowsFingerprint)}:final`
             const message = friendlyError(error)
             set((state) => ({ taskJournal: {
@@ -3340,12 +3360,13 @@ export const useStore = create<StoreState>((set, get) => ({
   retryMaterialInsight: async () => {
     if (materialInsightRetryRunning || isRunningPhase(get().phase) || get().readOnly) return
     const scanErrors: string[] = []
-    const rows = readMaterialInsightRows(get().sources, scanErrors)
+    const rows = readMaterialInsightRows(get().sources)
+    readOwnMaterialInsightRows(get().sources, scanErrors)
     if (scanErrors.length) {
       get()._post('assistant', `${scanErrors.slice(0, 3).join('；')} 请修正表格后再重试词云。`, 'error')
       return
     }
-    const scope = selectMaterialInsightScope(rows, get().selectedMaterialProducts)
+    const scope = selectOwnMaterialInsightScope(rows, get().selectedMaterialProducts)
     if (scope.needsSelection) {
       get()._post('assistant', scope.error || '请先确认素材产品范围。', 'error')
       return
@@ -3427,7 +3448,9 @@ export const useStore = create<StoreState>((set, get) => ({
     set({ exportStatus: '导出中…', lastExportPath: '' })
     const name = defaultReportName(format)
     const displayMarkdown = reportMarkdownForDisplay(md, buildEvidenceSourceNameMap(cleanDetails))
-    const insightScope = selectMaterialInsightScope(readMaterialInsightRows(get().sources), get().selectedMaterialProducts)
+    const materialRows = readMaterialInsightRows(get().sources)
+    const sceneScope = selectMaterialInsightScope(materialRows, get().selectedMaterialProducts)
+    const insightScope = selectOwnMaterialInsightScope(materialRows, get().selectedMaterialProducts)
     const insightFingerprint = materialInsightFingerprint(insightScope.rows, insightScope.selectedProducts)
     const insightId = `${materialInsightTaskPrefix(get().analysisSessionId, insightFingerprint)}:final`
     const materialInsight = !reportStale && !insightScope.needsSelection
@@ -3448,8 +3471,8 @@ export const useStore = create<StoreState>((set, get) => ({
       }))
     } : undefined
     const materialInsightStatus = materialInsight ? 'ready' : get().taskJournal[insightId]?.status === 'failed' ? 'failed' : 'missing'
-    const allSceneRows = !reportStale && !insightScope.needsSelection ? readMaterialInsightRows(get().sources) : []
-    const sceneCatalog = buildSceneCatalog(allSceneRows.filter((row) => insightScope.selectedProducts.includes(row.product) || /竞品|竞对/u.test(row.attribution)))
+    const allSceneRows = !reportStale && !sceneScope.needsSelection ? materialRows : []
+    const sceneCatalog = buildSceneCatalog(allSceneRows.filter((row) => sceneScope.selectedProducts.includes(row.product) || /竞品|竞对/u.test(row.attribution)))
     const usedSceneIds = new Set([...displayMarkdown.matchAll(/SC-[a-f0-9]{8}-\d{4}/giu)].map((match) => match[0].toUpperCase()))
     const sceneSourceAppendix = sceneCatalog.filter((item) => usedSceneIds.has(item.id.toUpperCase()))
       .map((item) => `- ${item.text}（${item.id}）：${item.sources.map((source) => `${source.sourceName} / ${source.sheetName} / ${source.rowEvidenceId}`).join('；')}`)

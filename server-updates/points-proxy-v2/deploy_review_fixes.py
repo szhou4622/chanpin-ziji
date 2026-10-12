@@ -32,7 +32,7 @@ MODEL = "doubao-seed-2-1-pro-260915"
 PORT = 8794
 DRAIN_TIMEOUT = 180
 BASELINES = {
-    "product_report_proxy.py": "beb42a1c11bad4ab310fa39f0a0088d2ccca9daee9c5fad087fce29b9992f790",
+    "product_report_proxy.py": "2c44a639654309f2e2509e52594ebdc773ac6f6173e91e3ac7a10a3782714b20",
     "por_billing_v2.py": "ea596cf3878eadf35f9ea3f45207f231b5d350fca4b40edf9e3d20121869b33c",
 }
 PREFIX = "/api/product-operation-report/v1/"

@@ -204,7 +204,7 @@ class ProtocolAdversarialTests(unittest.TestCase):
         endpoint, body = self.upstream_calls[-1]
         self.assertEqual(endpoint, "responses")
         self.assertEqual(body["model"], MANAGED_MODEL)
-        self.assertEqual(body["reasoning"], {"effort": "high"})
+        self.assertEqual(body["reasoning"], {"effort": "low"})
         self.assertEqual(body["max_tool_calls"], 1)
         self.assert_successful_result(*result)
 

@@ -17,6 +17,7 @@ import {
   computeSellingPointInsight,
   materialInsightFingerprint,
   parseSellingPointDescriptions,
+  selectOwnMaterialInsightScope,
   type MaterialInsightRow
 } from './materialInsights'
 
@@ -27,7 +28,7 @@ export function materialInsightTaskPrefix(sessionId: string, fingerprint: string
 function decodeInsight(text: string, fingerprint: string): MaterialSellingPointInsight | null {
   try {
     const result = JSON.parse(text) as MaterialSellingPointInsight
-    if (result.version !== 1 || result.fingerprint !== fingerprint || !Array.isArray(result.items) || !Array.isArray(result.mappings)) return null
+    if (result.version !== 1 || result.sourceScope !== 'own' || result.fingerprint !== fingerprint || !Array.isArray(result.items) || !Array.isArray(result.mappings)) return null
     const byKeyword = new Map<string, MaterialSellingPointInsight['mappings']>()
     result.mappings.forEach((mapping) => byKeyword.set(mapping.keyword, [...(byKeyword.get(mapping.keyword) || []), mapping]))
     return { ...result, items: result.items.map((item) => ({ ...item, evidence: byKeyword.get(item.keyword) || [] })) }
@@ -56,7 +57,9 @@ export async function runMaterialInsightWorkflow(params: {
   setAbort: (fn: (() => void) | null) => void
   onProgress: (message: string) => void
 }): Promise<MaterialSellingPointInsight> {
-  const fingerprint = materialInsightFingerprint(params.rows, params.selectedProducts)
+  const scope = selectOwnMaterialInsightScope(params.rows, params.selectedProducts)
+  if (scope.needsSelection) throw new Error(scope.error || '请先确认自有素材的产品范围。')
+  const fingerprint = materialInsightFingerprint(scope.rows, scope.selectedProducts)
   const prefix = materialInsightTaskPrefix(params.sessionId, fingerprint)
   const finalId = `${prefix}:final`
   const previousFinal = params.getTask(finalId)
@@ -64,7 +67,7 @@ export async function runMaterialInsightWorkflow(params: {
     const parsed = decodeInsight(previousFinal.output, fingerprint)
     if (parsed) return parsed
   }
-  const descriptions = params.rows.flatMap(parseSellingPointDescriptions)
+  const descriptions = scope.rows.flatMap(parseSellingPointDescriptions)
   const extractionJobs = buildExtractionJobs(descriptions)
   const aborts = createModelAbortGroup()
   params.setAbort(aborts.abort)
@@ -159,8 +162,8 @@ export async function runMaterialInsightWorkflow(params: {
       current = next
     }
     const insight = computeSellingPointInsight({
-      rows: params.rows,
-      scopeLabel: params.scopeLabel,
+      rows: scope.rows,
+      scopeLabel: scope.label,
       fingerprint,
       candidates,
       normalization

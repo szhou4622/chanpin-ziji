@@ -27,6 +27,7 @@ class ArkV2Tests(unittest.TestCase):
         self.input_tokens = 1000
         self.chat_output_parts = None
         self.upstream_done = False
+        self.simulate_reasoning_budget = False
         owner = self
 
         class FakeUpstream(BaseHTTPRequestHandler):
@@ -54,39 +55,56 @@ class ArkV2Tests(unittest.TestCase):
                 if body.get('model') != MANAGED_MODEL:
                     return self.send_json({'error': {'message': 'legacy model leaked upstream'}}, 400)
                 is_responses = self.path.endswith('/responses')
-                valid = (body.get('reasoning') == {'effort': 'high'} if is_responses
+                valid = (body.get('reasoning') in ({'effort': 'low'}, {'effort': 'high'}) if is_responses
                          else isinstance(body.get('max_completion_tokens'), int) and 'max_tokens' not in body)
                 if not valid or 'prompt_cache_key' in body:
                     return self.send_json({'error': {'message': 'Ark contract rejected'}}, 400)
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/event-stream')
                 self.end_headers()
-                usage = {'input_tokens': 1000, 'output_tokens': 1000,
+                output = 'OK'
+                output_tokens = 1000
+                reasoning_tokens = 0
+                finish_reason = 'stop' if owner.mode == 'success' else None
+                if owner.chat_output_parts is not None or owner.simulate_reasoning_budget:
+                    # Synthetic parts model tokens; both thinking and answer
+                    # consume the actual limit received over loopback HTTP.
+                    limit = body['max_output_tokens' if is_responses else 'max_completion_tokens']
+                    if owner.simulate_reasoning_budget and body.get('thinking', {}).get('type') != 'disabled':
+                        effort = (body.get('reasoning', {}).get('effort', 'high') if is_responses
+                                  else body.get('reasoning_effort', 'high'))
+                        reasoning_tokens = min(512, limit) if effort == 'low' else limit
+                    answer_budget = limit - reasoning_tokens
+                    parts = owner.chat_output_parts if owner.chat_output_parts is not None else ['OK']
+                    output = ''.join(parts[:answer_budget])
+                    output_tokens = reasoning_tokens + min(answer_budget, len(parts))
+                    finish_reason = 'length' if len(parts) > answer_budget else finish_reason
+                usage = {'input_tokens': owner.input_tokens, 'output_tokens': output_tokens,
                     'input_tokens_details': {'cached_tokens': 0}, 'tool_usage': {'web_search': 2}}
+                if reasoning_tokens:
+                    usage['output_tokens_details'] = {'reasoning_tokens': reasoning_tokens}
                 if is_responses:
-                    response = {'model': MANAGED_MODEL, 'usage': usage, 'output': [
+                    response = {'model': MANAGED_MODEL, 'usage': usage,
+                        'status': 'completed' if finish_reason == 'stop' else 'incomplete', 'output': [
                         {'type': 'web_search_call', 'id': 'ws-1', 'status': 'completed', 'action': {'query': 'brand'}},
-                        {'type': 'message', 'content': [{'type': 'output_text', 'text': 'OK', 'annotations': [
+                        {'type': 'message', 'content': [{'type': 'output_text', 'text': output, 'annotations': [
                             {'type': 'url_citation', 'url': 'https://example.com/brand', 'title': 'Brand'}]}]}]}
-                    events = [{'type': 'response.output_text.delta', 'delta': 'OK'},
-                        {'type': 'response.completed' if owner.mode == 'success' else 'response.in_progress',
+                    terminal = ('response.completed' if finish_reason == 'stop' else
+                                'response.incomplete' if finish_reason == 'length' else 'response.in_progress')
+                    events = [{'type': 'response.output_text.delta', 'delta': output},
+                        {'type': terminal,
                          'response': response}]
                 else:
-                    output = 'OK'
-                    output_tokens = 1000
-                    finish_reason = 'stop' if owner.mode == 'success' else None
-                    if owner.chat_output_parts is not None:
-                        # Each synthetic part represents one token. Enforce the
-                        # real HTTP request's cap instead of assuming a successful
-                        # terminal response independently of the proxy's budget.
-                        limit = body['max_completion_tokens']
-                        output = ''.join(owner.chat_output_parts[:limit])
-                        output_tokens = min(limit, len(owner.chat_output_parts))
-                        finish_reason = 'length' if len(owner.chat_output_parts) > limit else finish_reason
+                    chat_usage = {'prompt_tokens': owner.input_tokens, 'completion_tokens': output_tokens}
+                    if reasoning_tokens:
+                        chat_usage['completion_tokens_details'] = {'reasoning_tokens': reasoning_tokens}
                     events = [{'model': MANAGED_MODEL, 'choices': [{'delta': {'content': output}}]},
                         {'model': MANAGED_MODEL, 'choices': [{'delta': {},
                             'finish_reason': finish_reason}],
-                         'usage': {'prompt_tokens': owner.input_tokens, 'completion_tokens': output_tokens}}]
+                         'usage': chat_usage}]
+                    if reasoning_tokens:
+                        events.insert(0, {'model': MANAGED_MODEL,
+                            'choices': [{'delta': {'reasoning_content': 'offline reasoning summary'}}]})
                 for event in events:
                     self.wfile.write(b'data: ' + json.dumps(event).encode() + b'\n\n')
                 if owner.upstream_done:
@@ -162,7 +180,7 @@ class ArkV2Tests(unittest.TestCase):
             return response.read().decode()
 
     def chat(self, task, model=MANAGED_MODEL, precise=True, *, logical_id=None,
-             task_key=None, attempt=1, content='OK'):
+             task_key=None, attempt=1, content='OK', options=None):
         request_id = str(uuid.uuid4())
         logical_id = logical_id or 'offline:' + request_id
         headers = {'Authorization': 'Bearer ' + self.token, 'x-request-id': request_id,
@@ -172,7 +190,7 @@ class ArkV2Tests(unittest.TestCase):
         if precise:
             headers['x-result-confirmation-capable'] = '1'
         stream = self.post('/chat/completions', {'model': model,
-            'messages': [{'role': 'user', 'content': content}]}, headers)
+            'messages': [{'role': 'user', 'content': content}], **(options or {})}, headers)
         return stream, request_id, logical_id
 
     def confirm(self, request_id, logical_id, output='OK'):
@@ -195,6 +213,137 @@ class ArkV2Tests(unittest.TestCase):
                             for model in proxy.ALLOWED_MODELS)
         return ((reserve_milli + 999) // 1000) * proxy.billing_v2.UNITS_PER_POINT
 
+    def test_server_owned_task_policy_ignores_client_reasoning_and_budget_overrides(self):
+        budgets = {'source_clean': 12000, 'summary': 3500, 'analysis_step': 12000,
+            'final_part': proxy.MAX_OUTPUT_TOKENS, 'revision_part': proxy.MAX_OUTPUT_TOKENS,
+            'module_product_info': 8000, 'module_platform_audience': 16000,
+            'module_material_review': 16000, 'module_benchmark': 16000,
+            'module_selling_points': 16000, 'module_voc': 16000,
+            'module_ranking': 16000, 'module_audience_sp_scene': 16000}
+        cases = [(task, None, task in ('source_clean', 'summary', 'module_product_info'), budget)
+                 for task, budget in budgets.items()]
+        for suffix in ('extract-0001', 'normalize-0-0'):
+            cases.append(('module_selling_points',
+                ':material-insight:v1:abcdef12-1234-11:' + suffix, True, 16000))
+        for suffix in (':material-insight:v2:abcdef12-1234-11:extract-0001',
+                       ':material-insight:v1:not-a-fingerprint:extract-0001',
+                       ':material-insight:v1:abcdef12-1234-11:extract-0001-extra',
+                       ':material-insight:v1:abcdef12-1234-11:normalize-0-0:extra',
+                       ':material-insight:v1:abcdef12-1234-11:final'):
+            cases.append(('module_selling_points', suffix, False, 16000))
+        cases.append(('module_voc', ':material-insight:v1:abcdef12-1234-11:extract-0001', False, 16000))
+        for index, (task, suffix, direct, budget) in enumerate(cases):
+            for client_effort in ('high', 'minimal'):
+                with self.subTest(task=task, suffix=suffix, client_effort=client_effort):
+                    task_key = 'policy-' + str(index) + '-' + client_effort + suffix if suffix else None
+                    stream, request_id, logical_id = self.chat(task, task_key=task_key, options={
+                        'thinking': {'type': 'enabled' if direct else 'disabled'},
+                        'reasoning_effort': client_effort,
+                        'reasoning': {'effort': client_effort, 'budget_tokens': 1},
+                        'max_completion_tokens': 32768, 'max_output_tokens': 1, 'max_tokens': 1,
+                        'prompt_cache_key': 'untrusted-client-hint'})
+                    self.assertIn('[DONE]', stream)
+                    endpoint, body, _ = self.requests[-1]
+                    self.assertEqual(body['thinking'], {'type': 'disabled' if direct else 'enabled'})
+                    self.assertNotIn('prompt_cache_key', body)
+                    self.assertNotIn('max_tokens', body)
+                    if task == 'module_benchmark':
+                        self.assertTrue(endpoint.endswith('/responses'))
+                        self.assertEqual(body['reasoning'], {'effort': 'low'})
+                        self.assertNotIn('reasoning_effort', body)
+                        self.assertNotIn('max_completion_tokens', body)
+                        actual_limit = body['max_output_tokens']
+                    else:
+                        self.assertTrue(endpoint.endswith('/chat/completions'))
+                        self.assertNotIn('reasoning', body)
+                        self.assertNotIn('max_output_tokens', body)
+                        if direct:
+                            self.assertNotIn('reasoning_effort', body)
+                        else:
+                            self.assertEqual(body['reasoning_effort'], 'low')
+                        actual_limit = body['max_completion_tokens']
+                    self.assertEqual(actual_limit, min(proxy.MAX_OUTPUT_TOKENS, budget))
+                    with proxy.database() as db:
+                        reserved = db.execute('SELECT reserved_units FROM por_v2_attempts WHERE request_id=?',
+                                              (request_id,)).fetchone()[0]
+                    self.assertEqual(reserved, self.expected_reserve('OK', actual_limit))
+                    self.assertEqual(self.confirm(request_id, logical_id)['state'], 'charged')
+
+    def test_global_budget_still_clamps_upstream_and_reservation(self):
+        with patch.object(proxy, 'MAX_OUTPUT_TOKENS', 9000):
+            for task in ('source_clean', 'module_voc', 'module_benchmark', 'final_part'):
+                with self.subTest(task=task):
+                    _, request_id, logical_id = self.chat(task)
+                    body = self.requests[-1][1]
+                    actual_limit = body['max_output_tokens' if task == 'module_benchmark' else 'max_completion_tokens']
+                    self.assertEqual(actual_limit, 9000)
+                    with proxy.database() as db:
+                        reserved = db.execute('SELECT reserved_units FROM por_v2_attempts WHERE request_id=?',
+                                              (request_id,)).fetchone()[0]
+                    self.assertEqual(reserved, self.expected_reserve('OK', actual_limit))
+                    self.assertEqual(self.confirm(request_id, logical_id)['state'], 'charged')
+
+    def test_high_thinking_only_failures_retry_with_visible_output_and_one_actual_charge(self):
+        self.simulate_reasoning_budget = True
+        self.chat_output_parts = ['answer '] * 4000 + ['COMPLETE']
+        self.upstream_done = True
+        current_options = proxy.apply_server_task_options
+        current_responses_body = proxy.responses_request_body
+
+        def legacy_high_options(body, task_type, task_key=''):
+            current_options(body, task_type, task_key)
+            body['thinking'] = {'type': 'enabled'}
+            body.pop('reasoning_effort', None)  # Seed 2.1 defaults to high.
+
+        def legacy_high_responses(body):
+            result = current_responses_body(body)
+            result['reasoning'] = {'effort': 'high'}
+            return result
+
+        scenarios = [('module_product_info', 5000, None, True),
+            ('module_platform_audience', 8000, None, False),
+            ('module_material_review', 10000, None, False),
+            ('module_selling_points', 7000, 'extract-0001', True),
+            ('module_selling_points', 7000, 'normalize-0-0', True),
+            ('module_voc', 10000, None, False),
+            ('module_benchmark', 5000, None, False)]
+        for index, (task, old_limit, insight_suffix, direct) in enumerate(scenarios):
+            with self.subTest(task=task, insight_suffix=insight_suffix):
+                logical_id = 'offline:reasoning-recovery-' + str(index)
+                task_key = ('reasoning-' + str(index) + ':material-insight:v1:abcdef12-1234-11:' + insight_suffix
+                            if insight_suffix else 'reasoning:' + task + ':' + str(index))
+                previous_debits = len(self.debits)
+                with patch.dict(proxy.TASK_OUTPUT_RESERVES, {task: old_limit}), \
+                        patch.object(proxy, 'apply_server_task_options', legacy_high_options), \
+                        patch.object(proxy, 'responses_request_body', legacy_high_responses):
+                    old_stream, old_id, _ = self.chat(task, logical_id=logical_id, task_key=task_key)
+                self.assertEqual(self.stream_text(old_stream), '')
+                self.assertNotIn('[DONE]', old_stream)
+                with proxy.database() as db:
+                    old = db.execute('SELECT * FROM por_v2_attempts WHERE request_id=?', (old_id,)).fetchone()
+                self.assertEqual(old['state'], 'failed_no_charge')
+                self.assertEqual(json.loads(old['provider_usage_json'])['output_tokens'], old_limit)
+                self.assertEqual(len(self.debits), previous_debits)
+
+                stream, new_id, _ = self.chat(task, logical_id=logical_id, task_key=task_key, attempt=2)
+                visible = ''.join(self.chat_output_parts)
+                self.assertEqual(self.stream_text(stream), visible)
+                self.assertNotIn('offline reasoning summary', visible)
+                self.assertIn('[DONE]', stream)
+                charged = self.confirm(new_id, logical_id, visible)
+                duplicate = self.confirm(new_id, logical_id, visible)
+                self.assertEqual(charged['state'], 'charged')
+                self.assertEqual(duplicate['charged_units'], charged['charged_units'])
+                expected_output_tokens = len(self.chat_output_parts) + (0 if direct else 512)
+                expected_cost = (Decimal(self.input_tokens) * 6 + Decimal(expected_output_tokens) * 30) / 1_000_000
+                self.assertEqual(Decimal(self.debits[logical_id][4]), expected_cost)
+                self.assertEqual(len(self.debits), previous_debits + 1)
+                with proxy.database() as db:
+                    new = db.execute('SELECT * FROM por_v2_attempts WHERE request_id=?', (new_id,)).fetchone()
+                    self.assertEqual(json.loads(new['provider_usage_json'])['output_tokens'], expected_output_tokens)
+                    self.assertEqual(db.execute('SELECT COUNT(*) FROM por_v2_ledger WHERE logical_task_id=?',
+                                               (logical_id,)).fetchone()[0], 1)
+
     def test_source_clean_completes_above_old_cap_and_reserves_full_output_budget(self):
         self.chat_output_parts = ['evidence '] * 6000 + ['\nCOVERAGE:OFFLINE-COMPLETE']
         self.input_tokens = 14089
@@ -202,7 +351,7 @@ class ArkV2Tests(unittest.TestCase):
         content = 'synthetic source row\n' * 900
         stream, request_id, logical_id = self.chat('source_clean', content=content)
         output_limit = self.requests[-1][1]['max_completion_tokens']
-        self.assertEqual(output_limit, proxy.MAX_OUTPUT_TOKENS)
+        self.assertEqual(output_limit, min(proxy.MAX_OUTPUT_TOKENS, 12000))
         self.assertGreater(output_limit, 2500)
         self.assertEqual(self.requests[-1][1]['thinking'], {'type': 'disabled'})
         self.assertEqual(self.stream_text(stream), ''.join(self.chat_output_parts))

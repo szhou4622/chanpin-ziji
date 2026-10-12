@@ -1,4 +1,4 @@
-"""Raise the verified 6,000-token environment ceiling to 12,000 safely.
+"""Change an explicitly verified environment token ceiling safely.
 
 Run beside deploy_review_fixes.py on the proxy host. Only one environment
 assignment changes. Preserve an audit backup, gate/drain requests, restart and
@@ -26,7 +26,11 @@ def running_budget():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--check-only', action='store_true')
+    parser.add_argument('--from-tokens', required=True, type=int)
+    parser.add_argument('--to-tokens', required=True, type=int)
     options = parser.parse_args()
+    if not 1024 <= options.from_tokens <= 32768 or not 1024 <= options.to_tokens <= 32768:
+        raise RuntimeError('budget is outside the supported bounded range')
     if os.geteuid() != 0:
         raise RuntimeError('run as root on the production host')
     directory = os.open(deploy.ROOT, os.O_RDONLY)
@@ -36,8 +40,11 @@ def main():
     original = target.read_bytes()
     if len(re.findall(rb'^POR_MAX_OUTPUT_TOKENS=.*$', original, re.M)) != 1:
         raise RuntimeError('unexpected output budget assignments')
-    replacement, count = re.subn(rb'^POR_MAX_OUTPUT_TOKENS=6000(\r?)$', rb'POR_MAX_OUTPUT_TOKENS=12000\1', original, flags=re.M)
-    if count != 1 or running_budget() != '6000':
+    expected = str(options.from_tokens).encode()
+    requested = str(options.to_tokens).encode()
+    replacement, count = re.subn(rb'^POR_MAX_OUTPUT_TOKENS=' + expected + rb'(\r?)$',
+        lambda match: b'POR_MAX_OUTPUT_TOKENS=' + requested + match.group(1), original, flags=re.M)
+    if count != 1 or running_budget() != str(options.from_tokens):
         raise RuntimeError('running or persisted budget differs; no writes')
     for suffix in ('precise-proxy.env', 'ark-proxy.env'):
         if re.search(rb'^POR_MAX_OUTPUT_TOKENS=', target.with_name(suffix).read_bytes(), re.M):
@@ -47,7 +54,7 @@ def main():
     gated = deploy.gated_nginx(nginx)
     deploy.health_once()
     if options.check_only:
-        print(json.dumps({'check_only': True, 'from': 6000, 'to': 12000,
+        print(json.dumps({'check_only': True, 'from': options.from_tokens, 'to': options.to_tokens,
                           'running_requests': deploy.active_requests()}), flush=True)
         return
     stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
@@ -62,7 +69,7 @@ def main():
         deploy.replace_checked(target, replacement, deploy.digest(original), info)
         deploy.run(['systemctl', 'restart', deploy.SERVICE])
         deploy.wait_healthy()
-        if running_budget() != '12000':
+        if running_budget() != str(options.to_tokens):
             raise RuntimeError('new running budget was not applied')
         deploy.replace_checked(deploy.NGINX, nginx, deploy.digest(gated), nginx_info)
         deploy.nginx_reload()
@@ -75,7 +82,7 @@ def main():
             deploy.replace_checked(deploy.NGINX, nginx, deploy.digest(gated), nginx_info)
             deploy.nginx_reload()
         raise
-    evidence = {'running_max_output_tokens': 12000, 'backup': str(backup),
+    evidence = {'running_max_output_tokens': options.to_tokens, 'backup': str(backup),
                 'only_assignment_changed': True, 'nginx_restored': deploy.digest(deploy.NGINX.read_bytes()) == deploy.digest(nginx)}
     deploy.atomic(backup / 'verification.json', json.dumps(evidence).encode())
     print(json.dumps(evidence), flush=True)

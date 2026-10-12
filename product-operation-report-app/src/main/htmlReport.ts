@@ -651,7 +651,7 @@ function renderMaterialInsightCloud(
         ? `<p class="visual-note">为保持报告流畅，这里展示 ${item.evidence.length}/${item.evidenceTotal} 条来源样例；完整逐行映射保存在本机项目中。</p>` : ''}
       <div class="material-insight-evidence-list">${item.evidence.map((evidence) => `<p><strong>${escapeHtml(evidence.rawDescription)}</strong>
       <small>候选：${escapeHtml(evidence.candidate)}；原文片段：${escapeHtml(evidence.evidenceSnippet)}；${escapeHtml(evidence.sourceName)} / ${escapeHtml(evidence.sheetName)} / ${escapeHtml(evidence.rowEvidenceId)} / ${evidence.topRank ? `Top${evidence.topRank}` : '未排序'}</small></p>`).join('')}</div></details>`).join('')}</div>`
-      : '<p class="visual-note">未从卖点排序字段中识别到可统计卖点。</p>'}
+      : `<p class="visual-note">${insight.sourceScope === 'own' && insight.totalMaterials === 0 ? '未上传本次范围的自有素材，暂无词云统计。' : '未从卖点排序字段中识别到可统计卖点。'}</p>`}
     <div class="material-insight-print-copy" aria-hidden="true">${items.map((item) => `<h4>${escapeHtml(item.keyword)}</h4>${item.evidence.map((evidence) =>
       `<p>${escapeHtml(evidence.rawDescription)}（${escapeHtml(evidence.sourceName)} / ${escapeHtml(evidence.sheetName)} / ${escapeHtml(evidence.rowEvidenceId)}）</p>`
     ).join('')}`).join('')}</div>

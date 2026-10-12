@@ -9,7 +9,7 @@ import type {
 import { sourceEvidenceId, sourceEvidenceScope } from './sourceCleanBatches'
 export type { SceneCatalogEntry } from '../../shared/types'
 
-export const MATERIAL_INSIGHT_VERSION = 'material-insight-v1'
+export const MATERIAL_INSIGHT_VERSION = 'material-insight-v2-own'
 export const UNLABELED_PRODUCT = '未标注产品'
 
 export interface MaterialInsightRow {
@@ -86,9 +86,10 @@ function materialIdentity(
   return `material:${stableHash(`${namespace}|${raw}`)}`
 }
 
-export function readMaterialInsightRows(sources: ProjectSourceSnapshot[], diagnostics: string[] = []): MaterialInsightRow[] {
+function readMaterialRows(sources: ProjectSourceSnapshot[], diagnostics: string[], onlyOwn: boolean): MaterialInsightRow[] {
   const result: MaterialInsightRow[] = []
   for (const [sourceOrdinal, source] of sources.entries()) {
+    if (onlyOwn && source.attribution !== '自有数据') continue
     if (source.kind !== 'table' || source.kindV1 !== 'material-data' || !source.text?.trim() || source.error) continue
     const cached = parsedMaterialRows.get(source)?.get(sourceOrdinal)
     if (cached) {
@@ -140,6 +141,14 @@ export function readMaterialInsightRows(sources: ProjectSourceSnapshot[], diagno
   return result
 }
 
+export function readMaterialInsightRows(sources: ProjectSourceSnapshot[], diagnostics: string[] = []): MaterialInsightRow[] {
+  return readMaterialRows(sources, diagnostics, false)
+}
+
+export function readOwnMaterialInsightRows(sources: ProjectSourceSnapshot[], diagnostics: string[] = []): MaterialInsightRow[] {
+  // Retain original source ordinals so evidence/material identities match the full report.
+  return readMaterialRows(sources, diagnostics, true)
+}
 
 export function selectMaterialInsightScope(
   rows: MaterialInsightRow[],
@@ -168,6 +177,25 @@ export function selectMaterialInsightScope(
   }
 }
 
+/** The word cloud uses own material; the general scope remains available to scene analysis. */
+export function selectOwnMaterialInsightScope(
+  rows: MaterialInsightRow[],
+  requestedProducts: string[]
+): MaterialInsightScope {
+  const ownProducts = new Set(rows.filter((row) => row.attribution === '自有数据').map((row) => row.product))
+  if (!ownProducts.size) {
+    return { rows: [], products: [], selectedProducts: [], label: '自有素材', needsSelection: false }
+  }
+  const scope = selectMaterialInsightScope(rows, requestedProducts)
+  const selectedProducts = scope.selectedProducts.filter((product) => ownProducts.has(product))
+  return {
+    ...scope,
+    rows: scope.rows.filter((row) => row.attribution === '自有数据'),
+    products: scope.products.filter((product) => ownProducts.has(product)),
+    selectedProducts,
+    label: selectedProducts.length ? selectedProducts.join('、') : '自有素材'
+  }
+}
 
 export function parseSellingPointDescriptions(row: MaterialInsightRow): MaterialDescription[] {
   const raw = row.sellingPoint.trim()
@@ -246,10 +274,12 @@ export function validateSceneSelection(output: string, catalog: SceneCatalogEntr
 }
 
 export function materialInsightFingerprint(rows: MaterialInsightRow[], selectedProducts: string[]): string {
-  const input = `${MATERIAL_INSIGHT_VERSION}|${selectedProducts.join('|')}|${rows.map((row) => [
+  const ownRows = rows.filter((row) => row.attribution === '自有数据')
+  const products = selectedProducts.filter((product) => ownRows.some((row) => row.product === product))
+  const input = `${MATERIAL_INSIGHT_VERSION}|${products.join('|')}|${ownRows.map((row) => [
     row.rowEvidenceId, row.materialKey, row.product, row.sellingPoint, row.needScene
   ].join('|')).join('\n')}`
-  return `${stableHash(input)}-${input.length}-${rows.length}`
+  return `${stableHash(input)}-${input.length}-${ownRows.length}`
 }
 
 export function computeSellingPointInsight(input: {
@@ -259,11 +289,16 @@ export function computeSellingPointInsight(input: {
   candidates: MaterialSellingPointEvidence[]
   normalization: Record<string, string>
 }): MaterialSellingPointInsight {
-  const allMaterials = new Set(input.rows.map((row) => row.materialKey))
-  const withSellingPoint = new Set(input.rows.filter((row) => row.sellingPoint.trim()).map((row) => row.materialKey))
-  const missingSellingPointRows = input.rows.filter((row) => !withSellingPoint.has(row.materialKey))
+  const rows = input.rows.filter((row) => row.attribution === '自有数据')
+  const evidenceKey = (row: Pick<MaterialInsightRow, 'sourceId' | 'rowEvidenceId' | 'materialKey'>): string =>
+    JSON.stringify([row.sourceId, row.rowEvidenceId, row.materialKey])
+  const allowedEvidence = new Set(rows.map(evidenceKey))
+  const allMaterials = new Set(rows.map((row) => row.materialKey))
+  const withSellingPoint = new Set(rows.filter((row) => row.sellingPoint.trim()).map((row) => row.materialKey))
+  const missingSellingPointRows = rows.filter((row) => !withSellingPoint.has(row.materialKey))
     .map((row) => ({ sourceName: row.sourceName, sheetName: row.sheetName, rowEvidenceId: row.rowEvidenceId }))
   const mappings: MaterialSellingPointMapping[] = input.candidates.flatMap((candidate) => {
+    if (!allowedEvidence.has(evidenceKey(candidate))) return []
     const keyword = input.normalization[candidate.candidate]?.trim()
     if (!keyword || /^(?:未知|无有效卖点|解析失败|暂无)$/u.test(keyword)) return []
     return [{ ...candidate, keyword }]
@@ -294,6 +329,7 @@ export function computeSellingPointInsight(input: {
   }).sort((a, b) => b.materialCount - a.materialCount || b.rankScore - a.rankScore || (a.keyword < b.keyword ? -1 : a.keyword > b.keyword ? 1 : 0))
   return {
     version: 1,
+    sourceScope: 'own',
     fingerprint: input.fingerprint,
     scopeLabel: input.scopeLabel,
     totalMaterials: allMaterials.size,

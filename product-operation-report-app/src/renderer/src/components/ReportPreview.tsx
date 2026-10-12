@@ -4,7 +4,7 @@ import remarkGfm from 'remark-gfm'
 import { buildEvidenceSourceNameMap, reportMarkdownForDisplay, splitReportAtSellingPoints } from '../../../shared/reportDisplay'
 import { useStore } from '../store'
 import { validateReport, validateReportStructure } from '../validate'
-import { materialInsightFingerprint, readMaterialInsightRows, selectMaterialInsightScope } from '../materialInsights'
+import { materialInsightFingerprint, readMaterialInsightRows, selectOwnMaterialInsightScope } from '../materialInsights'
 import { materialInsightTaskPrefix, readMaterialInsightResult } from '../materialInsightWorkflow'
 
 export default function ReportPreview(): JSX.Element {
@@ -26,7 +26,7 @@ export default function ReportPreview(): JSX.Element {
   const showLastExportInFolder = useStore((s) => s.showLastExportInFolder)
 
   const reportGenerating = phase === 'cleaning' || phase === 'analyzing'
-  const insightScope = useMemo(() => selectMaterialInsightScope(
+  const insightScope = useMemo(() => selectOwnMaterialInsightScope(
     readMaterialInsightRows(sources), selectedMaterialProducts
   ), [sources, selectedMaterialProducts])
   const insightFingerprint = useMemo(() => materialInsightFingerprint(
@@ -83,11 +83,12 @@ export default function ReportPreview(): JSX.Element {
             return <span key={item.keyword} style={{ fontSize: size }} title={`${item.keyword}：${item.materialCount}份素材，覆盖率 ${(item.coverageRate * 100).toFixed(1)}%`}>
               {item.keyword} ×{item.materialCount}</span>
           })}
-        </div> : <p>未从卖点排序字段中识别到可统计卖点。</p>}
+        </div> : <p>{materialInsight.totalMaterials === 0 ? '未上传本次范围的自有素材，暂无词云统计。' : '未从卖点排序字段中识别到可统计卖点。'}</p>}
       </> : <>
-        <p>{materialInsightTaskStatus === 'failed' ? '卖点提取未完成，词云待重试。' :
+        <p>{!insightScope.needsSelection && insightScope.rows.length === 0 ? '未上传本次范围的自有素材，暂无词云统计。' :
+          materialInsightTaskStatus === 'failed' ? '卖点提取未完成，词云待重试。' :
           materialInsightTaskStatus === 'interrupted' ? '正在重试卖点词云…' : '本报告尚未生成新版素材卖点统计。'}</p>
-        {!reportGenerating && !reportStale && phase === 'done' && materialInsightTaskStatus !== 'interrupted' && (
+        {insightScope.rows.length > 0 && !reportGenerating && !reportStale && phase === 'done' && materialInsightTaskStatus !== 'interrupted' && (
           <button className="btn xs" type="button" onClick={() => void retryMaterialInsight()}>
             重试素材卖点词云（会按实际模型用量扣积分）
           </button>
