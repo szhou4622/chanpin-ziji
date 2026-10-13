@@ -1,6 +1,6 @@
 {
   "name": "product-operation-report-app",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "description": "产品内容策略系统 — 专业的产品经营与内容策略分析系统",
   "main": "./out/main/index.js",
   "author": "",
@@ -40,7 +40,7 @@
     "pdfjs-dist": "^4.7.76",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
-    "sharp": "^0.35.3",
+    "sharp": "^0.35.5",
     "word-extractor": "^1.0.4",
     "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
   },
