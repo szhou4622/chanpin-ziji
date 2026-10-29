@@ -428,8 +428,19 @@ export function validateModuleOutput(
   const errors: string[] = []
   if (key === 'product-info') {
     const labels = ['1. 产品基础', '2. SKU规格', '3. 价格', '4. 优惠赠品', '5. 原料/成分/材质', '6. 工艺技术', '7. 产品属性与功能', '8. 品牌背书', '9. 产品背书']
-    if (!ordered(value, labels)) errors.push('产品信息9个维度缺失或顺序错误')
-    if ((value.match(/信息：/gu) || []).length < 9 || (value.match(/来源：/gu) || []).length < 9) errors.push('产品信息必须逐维提供信息和来源')
+    const headings = [...value.matchAll(/^(?:#{1,6}[ \t]+)?([1-9]\. [^\r\n]+?)[ \t]*\r?$/gmu)]
+      .filter((match) => labels.includes(match[1]))
+    if (headings.length !== labels.length || headings.some((match, index) => match[1] !== labels[index])) {
+      errors.push('产品信息9个维度缺失或顺序错误')
+    }
+    // Sources may be numbered per the bundled prompt. Check each dimension so
+    // repeated fields elsewhere cannot hide missing information or evidence.
+    const missingFields = headings.some((heading, index) => {
+      const section = value.slice(heading.index! + heading[0].length, headings[index + 1]?.index ?? value.length)
+      return !/^[ \t]*信息[ \t]*[：:][ \t]*\S/mu.test(section) ||
+        !/^[ \t]*来源(?:[ \t]*\d+)?[ \t]*[：:][ \t]*\S/mu.test(section)
+    })
+    if (missingFields) errors.push('产品信息必须逐维提供信息和来源')
   }
   if (key === 'platform-audience') {
     if (engineVersion === 'v1') {

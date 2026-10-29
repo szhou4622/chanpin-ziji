@@ -18,6 +18,67 @@ import {
 } from './modules'
 import { inferSourcePlatform } from './sourceMetadata'
 
+describe('product information validation', () => {
+  const dimensions = [
+    '1. 产品基础', '2. SKU规格', '3. 价格', '4. 优惠赠品', '5. 原料/成分/材质',
+    '6. 工艺技术', '7. 产品属性与功能', '8. 品牌背书', '9. 产品背书'
+  ]
+  // Match the failing report's layout without retaining any student data.
+  const sections = dimensions.map((label, index) => [
+    label,
+    '信息：无',
+    ...([0, 5, 7, 8].includes(index)
+      ? ['来源：无']
+      : ['来源1：产品手卡｜规格', '来源2：详情页｜规格'])
+  ].join('\n'))
+  const valid = sections.join('\n\n')
+  const fieldError = '产品信息必须逐维提供信息和来源'
+
+  it.each(['v1', 'v2'] as const)('accepts mixed single and numbered sources in %s reports', (version) => {
+    expect(validateModuleOutput('product-info', valid, version)).toEqual([])
+  })
+
+  it('accepts unnumbered sources, Markdown headings, CRLF and either colon style', () => {
+    const output = dimensions.map((label) => `### ${label}\n信息 : 无\n来源 : 无`).join('\n\n')
+    expect(validateModuleOutput('product-info', output.replace(/\n/gu, '\r\n'))).toEqual([])
+  })
+
+  it.each(['信息', '来源'] as const)('rejects a missing %s field even if another dimension repeats it', (field) => {
+    const output = dimensions.map((label, index) => [
+      label,
+      ...(index === 0 && field === '信息' ? [] : ['信息：无']),
+      ...(index === 0 && field === '来源' ? [] : ['来源：无']),
+      ...(index === 1 ? [`${field}：额外内容`] : [])
+    ].join('\n')).join('\n\n')
+    expect(validateModuleOutput('product-info', output)).toContain(fieldError)
+  })
+
+  it.each(['信息', '来源'] as const)('rejects a whitespace-only %s field without borrowing the next line', (field) => {
+    const emptySection = sections[0].replace(new RegExp(`^${field}：[^\\r\\n]*`, 'mu'), `${field}：  `)
+    const output = [emptySection, ...sections.slice(1)].join('\r\n\r\n')
+    expect(validateModuleOutput('product-info', output)).toContain(fieldError)
+  })
+
+  it('accepts a remaining numbered source but rejects a dimension whose numbered sources are all empty', () => {
+    const partial = sections[1].replace('来源1：产品手卡｜规格', '来源1：  ')
+    const output = [sections[0], partial, ...sections.slice(2)].join('\n\n')
+    expect(validateModuleOutput('product-info', output)).toEqual([])
+    expect(validateModuleOutput('product-info', output.replace('来源2：详情页｜规格', '来源2：  '))).toContain(fieldError)
+  })
+
+  it('does not count field names embedded in prose as actual fields', () => {
+    expect(validateModuleOutput('product-info', valid.replace('信息：无', '说明中提到信息：无'))).toContain(fieldError)
+    expect(validateModuleOutput('product-info', valid.replace('来源：无', '说明中提到来源：无'))).toContain(fieldError)
+  })
+
+  it('rejects missing, reordered or duplicate dimensions', () => {
+    const orderError = '产品信息9个维度缺失或顺序错误'
+    expect(validateModuleOutput('product-info', sections.slice(0, 8).join('\n\n'))).toContain(orderError)
+    expect(validateModuleOutput('product-info', [sections[1], sections[0], ...sections.slice(2)].join('\n\n'))).toContain(orderError)
+    expect(validateModuleOutput('product-info', `${valid}\n\n${sections[0]}`)).toContain(orderError)
+  })
+})
+
 describe('v2 six-module report engine', () => {
   it('uses the fixed three-wave DAG and continuous M1-M6 order', () => {
     expect(REPORT_MODULES_V2.filter((module) => module.wave === 1).map((module) => module.id)).toEqual([1, 2, 3, 5])
