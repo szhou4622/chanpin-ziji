@@ -1,5 +1,6 @@
 import { marked } from 'marked'
 import { reportMarkdownForDisplay, reportModuleDecisionHeading } from '../shared/reportDisplay'
+import { layoutReportCloud, reportCloudPosition } from './htmlReportCloudLayout'
 import type { MaterialSellingPointInsight, SceneCatalogEntry } from '../shared/types'
 import {
   buildHtmlReportPresentation,
@@ -9,6 +10,7 @@ import {
 } from './htmlReportPresentation'
 import { renderReportStyles, type ReportThemeTokens } from './htmlReportStyles'
 import { resolveHtmlReportDesign, type HtmlReportDesign } from './htmlReportDesign'
+import { renderReferenceCover, renderReferenceModuleIntro, renderReferenceGenderOverview, renderReferenceAudienceStrategies, renderReferenceFactValue, renderReferenceMaterialCard, renderReferenceSellingGroups, renderReferenceClosing } from './htmlReportReferenceLayout'
 import {
   decodeHtmlEntities,
   parseHtmlReportModel,
@@ -401,8 +403,11 @@ function renderFigure(title: string, content: string, className = ''): string {
     hash = (hash * 31 + signature.charCodeAt(index)) >>> 0
   }
   const id = `visual-${hash.toString(36)}`
+  const caption = /^\d{2} /u.test(title)
+    ? `<span class="reference-section-number">${escapeHtml(title.slice(0, 2))}</span>${escapeHtml(title.slice(2))}`
+    : escapeHtml(title)
   return `<figure class="visual-block ${className}" aria-labelledby="${id}">
-    <figcaption id="${id}">${escapeHtml(title)}</figcaption>
+    <figcaption id="${id}">${caption}</figcaption>
     ${content}
   </figure>`
 }
@@ -476,7 +481,10 @@ function renderFactsVisual(
     `<div class="fact-grid">${table.rows
       .slice(0, 12)
       .map(
-        (row, index) => `<div class="fact-item">
+        (row, index) => section.number === 'M1' ? `<article class="fact-item reference-fact">
+          <header><b>${String(index + 1).padStart(2, '0')}</b><h4>${escapeHtml(shorten(row[0] || '', 30))}</h4></header>
+          <p class="reference-fact-value">${renderReferenceFactValue(row[0] || '', row[1] || '需补充')}</p>
+        </article>` : `<div class="fact-item">
           <b>${String(index + 1).padStart(2, '0')}</b>
           <span>${escapeHtml(shorten(row[0] || '', 30))}</span>
           <strong>${escapeHtml(shorten(row[1] || '需补充', 74))}</strong>
@@ -504,7 +512,7 @@ function renderPercentBars(
   )
   return renderFigure(
     title,
-    `${grouped.length > 1 ? `<div class="profile-platform-index"><strong>已识别 ${grouped.length} 个平台</strong><div>${grouped.map(([groupName]) => `<span>${escapeHtml(shorten(groupName, 28))}</span>`).join('')}</div></div>` : ''}<div class="profile-board" style="--profile-columns:${Math.min(grouped.length, 3)}">${grouped
+    `${renderReferenceGenderOverview(plan)}${grouped.length > 1 ? `<div class="profile-platform-index"><strong>已识别 ${grouped.length} 个平台</strong><div>${grouped.map(([groupName]) => `<span>${escapeHtml(shorten(groupName, 28))}</span>`).join('')}</div></div>` : ''}<div class="profile-board" style="--profile-columns:${Math.min(grouped.length, 3)}">${grouped
       .map(([groupName, groupFacets]) => {
         const statFacets = groupFacets.filter((facet) => facet.mode === 'stat')
         const barFacets = groupFacets.filter((facet) => facet.mode === 'bars')
@@ -568,25 +576,19 @@ function renderMaterialVisual(
         (table, tableIndex) => `<section class="method-playbook">
           <header><span>${escapeHtml(
             tableIndex === 0
-              ? table.context || '自有素材'
+              ? table.context === '自有素材' || !table.context ? '自有素材汇总' : table.context
               : table.context === '补充机会'
-                ? '补充机会'
-                : `竞品借鉴${table.context ? `：${table.context}` : ''}`
-          )}</span><strong>优先呈现 ${Math.min(table.rows.length, 3)} 项</strong></header>
+                ? '可补充素材方向'
+                : table.context === '竞品素材' ? '竞品素材汇总' : `竞品借鉴${table.context ? `：${table.context}` : ''}`
+          )}</span><strong>TOP${Math.min(table.rows.length, 5)}</strong></header>
           <div class="material-card-list">${table.rows
-            .slice(0, 3)
-            .map(
-              (row, index) => `<article class="material-card">
-                <header><span>${String(index + 1).padStart(2, '0')}</span><strong>${escapeHtml(shorten(row[0] || '素材方向', 70))}</strong></header>
-                <div><small>${escapeHtml(shorten(table.headers[1] || '数据依据', 16))}</small><p>${escapeHtml(shorten(row[1] || '暂无数据依据', 100))}</p></div>
-                <footer><small>${escapeHtml(shorten(table.headers[2] || '可复用方向', 16))}</small><p>${escapeHtml(shorten(row[2] || '暂无可复用方向', 120))}</p></footer>
-              </article>`
-            )
+            .slice(0, 5)
+            .map((row, index) => renderReferenceMaterialCard(row, table.headers, index))
             .join('')}</div>
         </section>`
       )
       .join('')}</div>
-      <p class="visual-note">每类先呈现优先级最高的3项，完整方向、依据和复用建议保留在详细证据中。竞品事实不会直接写成我方事实。</p>`,
+      <p class="visual-note">每类呈现原报告前5项，完整方向、依据和复用建议保留在详细证据中。竞品事实不会直接写成我方事实。</p>`,
     'methods-visual'
   )
 }
@@ -621,7 +623,7 @@ function renderMaterialInsightCloud(
   insight: MaterialSellingPointInsight | undefined,
   status: 'ready' | 'failed' | 'missing'
 ): string {
-  const subtitle = `基于${insight?.sourceScope === 'own' ? '自有' : '本次上传'}素材的「卖点排序Top3」提取。同一素材内相同卖点仅计一次，点击词语查看原始表达与来源。`
+  const subtitle = `基于${insight?.sourceScope === 'own' ? '自有' : '本次上传'}素材的「卖点排序Top3」提取。同一素材内相同卖点仅计一次，原始表达与来源收录在下方统计明细中。`
   if (!insight) {
     return `<section class="keyword-panel material-insight-cloud"><h3>素材高频卖点 Top20</h3><p>${escapeHtml(
       status === 'failed' ? '卖点提取未完成，词云待重试；其他报告内容不受影响。' :
@@ -629,9 +631,9 @@ function renderMaterialInsightCloud(
     )}</p></section>`
   }
   const items = insight.items
-  const min = items.length ? Math.min(...items.map((item) => item.materialCount)) : 0
   const max = items.length ? Math.max(...items.map((item) => item.materialCount)) : 0
-  const fontSize = (count: number): number => max === min ? 24 : Math.round(15 + (count - min) / (max - min) * 21)
+  const positions = layoutReportCloud(items)
+  const mobilePositions = layoutReportCloud(items, 400, 540)
   const selectionStyles = items.map((_, index) => `.material-insight-cloud:has(#cloud-term-${index}:checked) .cloud-evidence-${index} { display: block; }`).join('\n')
   return `<section class="keyword-panel material-insight-cloud" aria-labelledby="material-cloud-title">
     <style>${selectionStyles}</style>
@@ -647,14 +649,14 @@ function renderMaterialInsightCloud(
     ${items.length ? `<div class="cloud-explorer">
       <div class="cloud-visual">
         <p class="cloud-axis-note"><span>字号越大，出现素材越多</span><span>支持方向键切换词语</span></p>
-        <div class="word-cloud material-insight-words" role="radiogroup" aria-label="素材卖点出现频次，选择词语查看证据">
+        <div class="word-cloud material-insight-words packed-word-cloud" role="radiogroup" aria-label="素材卖点出现频次，选择词语查看证据">
           ${items.map((item, index) => `<label class="word-cloud__item" for="cloud-term-${index}" data-cloud-emphasis="${item.materialCount === max ? 'high' : 'normal'}"
-            style="--cloud-size:${fontSize(item.materialCount)}px" title="${escapeHtml(`${item.keyword}；出现素材数 ${item.materialCount}；覆盖率 ${(item.coverageRate * 100).toFixed(1)}%；Top1 ${item.top1Count} / Top2 ${item.top2Count} / Top3 ${item.top3Count} / 未排序 ${item.unrankedCount}；辅助得分 ${item.rankScore}`)}">
+            style="${reportCloudPosition(positions[index], 1000, 460, 'cloud')};${reportCloudPosition(mobilePositions[index], 400, 540, 'cloud-mobile')};--cloud-tone:${['#a86229', '#865a3c', '#5e7866', '#bd873d', '#7f6a88'][index % 5]}" title="${escapeHtml(`${item.keyword}；出现素材数 ${item.materialCount}；覆盖率 ${(item.coverageRate * 100).toFixed(1)}%；Top1 ${item.top1Count} / Top2 ${item.top2Count} / Top3 ${item.top3Count} / 未排序 ${item.unrankedCount}；辅助得分 ${item.rankScore}`)}">
             <input class="cloud-control" type="radio" name="material-cloud-term" id="cloud-term-${index}" aria-controls="cloud-evidence-${index}"${index === 0 ? ' checked' : ''}>
-            <b>${escapeHtml(item.keyword)}</b><small>×${item.materialCount}</small></label>`).join('')}
+            <b>${escapeHtml(item.keyword)}</b><small class="cloud-word-count">×${item.materialCount}</small></label>`).join('')}
         </div>
       </div>
-      <aside class="cloud-rankings" aria-label="卖点出现素材数排行">
+      <details class="cloud-ranking-disclosure"><summary>高频卖点统计明细：查看数量、原始表达与来源</summary><aside class="cloud-rankings" aria-label="卖点出现素材数排行">
         <h4>高频卖点排行</h4><p>按出现素材数排序 · 前 ${Math.min(items.length, 6)} 项</p>
         ${items.slice(0, 6).map(item => `<div class="cloud-ranking"><div><span>${escapeHtml(item.keyword)}</span><strong>${item.materialCount} 份</strong></div><span class="cloud-rank-track" aria-hidden="true"><i style="--frequency-width:${max > 0 ? Math.max(0, Math.min(100, item.materialCount / max * 100)) : 0}%"></i></span></div>`).join('')}
       </aside>
@@ -666,7 +668,7 @@ function renderMaterialInsightCloud(
         <div class="material-insight-evidence-list">${item.evidence.map((evidence, sourceIndex) => `<details${sourceIndex === 0 ? ' open' : ''}><summary>${escapeHtml(evidence.rawDescription)}</summary>
           <blockquote>${escapeHtml(evidence.evidenceSnippet)}</blockquote>
           <small>归一前表达：${escapeHtml(evidence.candidate)}<br>来源：${escapeHtml(evidence.sourceName)} / ${escapeHtml(evidence.sheetName)} / ${escapeHtml(evidence.rowEvidenceId)} / ${evidence.topRank ? `Top${evidence.topRank}` : '未排序'}</small>
-        </details>`).join('')}</div></section>`).join('')}</div>
+        </details>`).join('')}</div></section>`).join('')}</div></details>
     </div>`
       : `<p class="visual-note">${insight.sourceScope === 'own' && insight.totalMaterials === 0 ? '未上传本次范围的自有素材，暂无词云统计。' : '未从卖点排序字段中识别到可统计卖点。'}</p>`}
     <div class="material-insight-print-copy" aria-hidden="true">${items.map((item) => `<h4>${escapeHtml(item.keyword)}</h4>${item.evidence.map((evidence) =>
@@ -699,14 +701,14 @@ function renderOrdinalVisual(
   ) || plannedTable(section, plan)
   if (!table || table.rows.length === 0) return ''
   return renderFigure(
-    section.number === 'M5' && /VOC|用户真实需求/iu.test(section.title) ? '用户需求优先级' : '真实卖点表达顺序',
-    `<div class="ordinal-list">${table.rows
+    section.number === 'M5' && /VOC|用户真实需求/iu.test(section.title) ? '用户需求优先级' : section.number === 'M4' ? '02 卖点表达顺序：内容测试参考' : '真实卖点表达顺序',
+    `${section.number === 'M4' ? '<p class="visual-note reference-ranking-intro">保留原报告排序，作为选题与表达顺序参考；样本有限，不能直接视为成交贡献排名。</p>' : ''}<div class="ordinal-list${section.number === 'M4' ? ' reference-ranking-grid' : ''}">${table.rows
       .slice(0, 10)
       .map(
         (row, index) => `<div class="ordinal-item">
-          <span>${escapeHtml(shorten(row[0] || String(index + 1), 12))}</span>
+          <span>${escapeHtml(shorten(row[0] || `TOP${index + 1}`, 12).replace(/^TOP\s*/iu, 'TOP '))}</span>
           <div><strong>${escapeHtml(shorten(row[1] || '', 52))}</strong>
-          <p>${escapeHtml(shorten(row[5] || row[4] || row[3] || '', 80))}</p></div>
+          <p>${escapeHtml(row[3] || row[5] || row[4] || '')}</p></div>
         </div>`
       )
       .join('')}</div>
@@ -731,21 +733,21 @@ function renderVocInsights(
         const shareIndex = Math.max(0, table.headers.findIndex((header) => /占比/u.test(header)))
         const quoteIndex = Math.max(0, table.headers.findIndex((header) => /代表原话/u.test(header)))
         const sourceIndex = Math.max(0, table.headers.findIndex((header) => /^来源$/u.test(header)))
-        return `<section class="voc-group">
-          <header><div><small>用户声音分类</small><h3>${escapeHtml(table.context || '用户需求')}</h3></div><span>展示前5条</span></header>
+        return `<section class="voc-group reference-voc-group" data-voc-kind="${escapeHtml(table.context)}">
+          <header><h3>${escapeHtml(table.context || '用户需求')}</h3><span>展示前${Math.min(table.rows.length, 5)}条</span></header>
           <div class="voc-list">${table.rows.slice(0, 5).map((row) => `<article class="voc-item">
-            <span class="voc-rank">${escapeHtml(shorten(row[rankIndex] || '', 8))}</span>
+            <span class="voc-rank" aria-label="${escapeHtml(row[rankIndex] || '')}">✓</span>
             <div class="voc-item__main">
               <strong>${escapeHtml(shorten(row[termIndex] || '未命名需求', 34))}</strong>
-              <div class="voc-metrics"><span>${escapeHtml(row[frequencyIndex] || '频次未标注')}</span><span>${escapeHtml(row[shareIndex] || '占比未标注')}</span></div>
-              ${row[quoteIndex] ? `<blockquote>“${escapeHtml(shorten(row[quoteIndex], 74))}”</blockquote>` : ''}
+              <div class="voc-metrics"><span>${escapeHtml(/未提供|未标注|无法|未知|暂无/u.test(row[frequencyIndex] || '') ? '无精确频次' : row[frequencyIndex] || '无精确频次')}</span><span>${escapeHtml(row[shareIndex] || '占比未标注')}</span></div>
+              ${row[quoteIndex] ? `<blockquote>“${escapeHtml(row[quoteIndex])}”</blockquote>` : ''}
               ${row[sourceIndex] ? `<small class="voc-source">${escapeHtml(shorten(row[sourceIndex], 82))}</small>` : ''}
             </div>
           </article>`).join('')}</div>
         </section>`
       })
       .join('')}</div>
-      <p class="visual-note">TOP只表示排序，不参与需求词统计。每组先展示前5条，完整TOP10、原话与来源保留在下方“查看完整VOC明细”中。</p>`,
+      <p class="visual-note">按原报告顺序，每组先展示前5条，完整TOP10、原话与来源保留在下方“查看完整VOC明细”中。</p>`,
     'voc-visual'
   )
 }
@@ -754,7 +756,7 @@ function renderSellingStrategy(
   section: HtmlReportSection,
   plan: HtmlReportSectionPresentation
 ): string {
-  const matrix = renderSellingPointMatrix(section, plan)
+  const matrix = section.number === 'M4' ? renderReferenceSellingGroups(section) || renderSellingPointMatrix(section, plan) : renderSellingPointMatrix(section, plan)
   const ranking = renderOrdinalVisual(section, plan)
   if (!matrix && !ranking) return ''
   return `<div class="selling-strategy-visual">${matrix}${ranking}</div>`
@@ -770,6 +772,8 @@ function renderAudienceVisual(
   const sellingIndex = Math.max(0, table.headers.findIndex((header) => header.includes('核心卖点')))
   const sceneIndex = Math.max(0, table.headers.findIndex((header) => header.includes('核心场景')))
   const evidenceIndex = table.headers.findIndex((header) => /数据依据|特征/.test(header))
+  const reasonIndex = table.headers.findIndex(header => /匹配理由/u.test(header))
+  const strategyIndex = table.headers.findIndex(header => /内容策略|内容表达/u.test(header))
   return renderFigure(
     '人群、场景与卖点匹配路径',
     `<div class="audience-routes">${table.rows
@@ -778,17 +782,18 @@ function renderAudienceVisual(
         (row, index) => `<article class="audience-route">
           <header>
             <span class="audience-order">${String(index + 1).padStart(2, '0')}</span>
-            <strong>${escapeHtml(shorten(row[audienceIndex] || '', 68))}</strong>
+            <strong>${escapeHtml(row[audienceIndex] || '')}</strong>
           </header>
           <div class="audience-route__path">
             <div><small>发生在</small><p>${escapeHtml(shorten(row[sceneIndex] || '需补充', 72))}</p></div>
             <span class="route-arrow" aria-hidden="true">→</span>
-            <div><small>重点讲</small><p>${escapeHtml(shorten(row[sellingIndex] || '需补充', 72))}</p></div>
+            <div><small>重点讲</small><p>${escapeHtml((row[sellingIndex] || '需补充').replace(/^TOP\s*\d+\s*[｜|]\s*/iu, ''))}</p></div>
           </div>
+          ${strategyIndex >= 0 && row[strategyIndex] ? `<div class="audience-route__advice"><span>内容策略 · 待测试</span><strong>${escapeHtml(row[strategyIndex])}</strong></div>` : reasonIndex >= 0 && row[reasonIndex] ? `<div class="audience-route__advice"><span>匹配理由</span><strong>${escapeHtml(row[reasonIndex])}</strong></div>` : ''}
           ${
             evidenceIndex >= 0
               ? `<p class="audience-evidence"><span>依据</span>${escapeHtml(
-                  shorten(row[evidenceIndex] || '需补充', 110)
+                  row[evidenceIndex] || '需补充'
                 )}</p>`
               : ''
           }
@@ -1229,15 +1234,16 @@ function renderChapterIndex(headings: HeadingInfo[], model: HtmlReportModel): st
   if (chapters.length === 0) return ''
   return `<section class="chapter-index" aria-labelledby="chapter-index-title">
     <div class="chapter-index__head">
-      <h2 id="chapter-index-title">按经营问题进入报告</h2>
+      <h2 id="chapter-index-title">${moduleReport ? '六大分析模块' : '按经营问题进入报告'}</h2>
       <p>先看结论，再查看数据、人群、内容和执行建议。</p>
     </div>
     <nav class="chapter-index__grid" aria-label="报告章节">${chapters
-      .map((heading) => {
+      .map((heading, index) => {
         const match = heading.text.match(/^(\d+)\.\s*(.*)$/)
+        const label = moduleReport ? heading.text.replace(/^(?:M[1-8]\s*|内容洞察决策[一二三四五六]\s*[：:]\s*)/u, '') : match?.[2] || heading.text
         return `<a href="#${escapeHtml(heading.id)}">
-          <span class="chapter-index__no">${escapeHtml(match?.[1] || '')}</span>
-          <span>${escapeHtml(match?.[2] || heading.text)}</span>
+          <span class="chapter-index__no">${escapeHtml(moduleReport ? String(index + 1).padStart(2, '0') : match?.[1] || '')}</span>
+          <span>${escapeHtml(label)}</span>
           <b aria-hidden="true">→</b>
         </a>`
       })
@@ -1351,7 +1357,8 @@ function wrapSections(
       const coreAudienceIndex = detail.search(coreAudienceHeading)
       const platformDetail = coreAudienceIndex >= 0 ? detail.slice(0, coreAudienceIndex) : detail
       const coreAudienceDetail = coreAudienceIndex >= 0 ? detail.slice(coreAudienceIndex) : ''
-      segment = `${heading}${visual}${coreAudienceDetail}<details class="evidence-disclosure module-details profile-details"><summary><span>查看完整平台画像明细</span><small>${platformCount || 1}个平台，保留原始来源</small></summary><div class="module-raw-detail">${platformDetail}</div></details><div class="print-module-copy" aria-hidden="true">${platformDetail}</div>`
+      const audienceStrategies = renderReferenceAudienceStrategies(current.section)
+      segment = `${heading}${visual}${audienceStrategies || coreAudienceDetail}<details class="evidence-disclosure module-details profile-details"><summary><span>查看完整平台画像明细</span><small>${platformCount || 1}个平台，保留原始来源</small></summary><div class="module-raw-detail">${audienceStrategies ? detail : platformDetail}</div></details><div class="print-module-copy" aria-hidden="true">${audienceStrategies ? detail : platformDetail}</div>`
     } else if (visual && current.section.number === 'M3') {
       const headingEnd = segment.indexOf('</h2>') + '</h2>'.length
       const heading = segment.slice(0, headingEnd)
@@ -1374,6 +1381,9 @@ function wrapSections(
       const detail = segment.slice(headingEnd)
       segment = `${heading}${visual}${renderSceneSourceDetails(detail, sceneCatalog)}<details class="evidence-disclosure module-details audience-details"><summary><span>查看完整匹配依据</span><small>TOP5路径，保留人群、卖点与场景来源</small></summary><div class="module-raw-detail">${detail}</div></details><div class="print-module-copy" aria-hidden="true">${detail}</div>`
     } else if (visual) segment = segment.replace(/<\/h2>/, `</h2>${visual}`)
+    if (/^M[1-6]$/u.test(current.section.number)) {
+      segment = segment.replace('</h2>', `</h2>${renderReferenceModuleIntro(current.section)}`)
+    }
     output += `<section class="report-section" data-section="${escapeHtml(current.section.number)}">${segment}</section>`
   }
   return output
@@ -1458,11 +1468,10 @@ export async function markdownToHtmlDocument(
   <main class="shell">
     ${toc}
     <article class="report" id="report-main" tabindex="-1">
-      ${renderHero(model, presentation, design)}
-      ${renderDecisionDashboard(presentation)}
-      ${renderChapterIndex(headings, model)}
+      ${design ? renderReferenceCover(model, presentation, design.productName, new Map(model.sections.map(section => [section.number, headings.find(heading => heading.level === 2 && (heading.text === `${section.number} ${section.title}` || heading.text === reportModuleDecisionHeading(Number(section.number.slice(1)), section.title)))?.id || 'report-main']))) : `${renderHero(model, presentation)}${renderDecisionDashboard(presentation)}${renderChapterIndex(headings, model)}`}
       <div class="report-body">
         ${sectionBody}
+        ${design ? renderReferenceClosing() : ''}
         ${aiDisclaimer ? `<footer class="report-ai-disclaimer">${aiDisclaimer.trim()}</footer>` : ''}
       </div>
     </article>

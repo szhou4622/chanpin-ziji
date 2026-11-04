@@ -190,6 +190,19 @@ export default function ReportPreview(): JSX.Element {
             <div className="report-placeholder-copy">
               系统会把已确认的资料清洗、卖点、人群和内容策略整合成一份可导出的经营报告。
             </div>
+            <section className="report-points-estimate" aria-labelledby="report-points-estimate-title">
+              <div className="report-points-estimate-header">
+                <h3 id="report-points-estimate-title">生成报告需要多少积分？</h3>
+                <span>测试参考</span>
+              </div>
+              <p className="report-points-estimate-range">
+                <span>约</span><strong>500–1,000</strong><span>积分／份</span>
+              </p>
+              <p className="report-points-estimate-reserve">建议预留 <strong>1,000 积分</strong></p>
+              <p className="report-points-estimate-note">
+                实际消耗随资料量、图片页数和补充修改次数变化，以实际扣除为准。
+              </p>
+            </section>
             <div className="report-skeleton-list">
               {['结论摘要', '数据来源与使用范围', '产品基础信息', '一方数据判断', '竞品/素材分析', '人群画像与内容主线', '执行选题表'].map((item) => (
                 <span key={item}>{item}</span>

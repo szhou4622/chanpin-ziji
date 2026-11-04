@@ -513,20 +513,22 @@ async function runAudit(): Promise<void> {
       window.setContentSize(width, 1000)
       await new Promise(resolveWait => setTimeout(resolveWait, 60))
       const measured = await window.webContents.executeJavaScript(`(() => {
-        const visible = e => e.getBoundingClientRect().width > 0 && e.getBoundingClientRect().height > 0
+        const visible = e => e.checkVisibility() && e.getBoundingClientRect().width > 0 && e.getBoundingClientRect().height > 0
         return { width:innerWidth,scroll:document.documentElement.scrollWidth,
           style:document.body.dataset.reportStyle,variant:document.body.dataset.brandVariant,
           words:document.querySelectorAll('.cloud-control').length,
           panels:[...document.querySelectorAll('.cloud-evidence-panel')].filter(visible).length,
           clippedWords:[...document.querySelectorAll('.word-cloud__item')].filter(e=>e.getBoundingClientRect().right>innerWidth).length,
-          navClipped:[...document.querySelectorAll('.toc a')].filter(e=>e.scrollWidth>e.clientWidth+1).length }
+          navClipped:[...document.querySelectorAll('.toc a')].filter(e=>e.scrollWidth>e.clientWidth+1).length,
+          printCopiesVisible:[...document.querySelectorAll('.print-module-copy')].filter(visible).length }
       })()`)
       assert.equal(measured.style, expected)
       assert.equal(measured.words, 20)
-      assert.equal(measured.panels, 1, 'Only the selected keyword evidence should be visible')
+      assert.equal(measured.panels, 0, 'Cloud evidence must stay collapsed by default')
       assert.ok(measured.scroll <= measured.width + 1, `${name} ${width}px report overflow`)
       assert.equal(measured.clippedWords, 0)
       assert.equal(measured.navClipped, 0)
+      assert.equal(measured.printCopiesVisible, 0, 'Print-only evidence must not duplicate the screen report')
       if (width === 1440) {
         merchantAudit.push({ name, style: measured.style, variant: measured.variant, words: measured.words })
         const contrastFailures = await window.webContents.executeJavaScript(`(() => {
@@ -548,9 +550,18 @@ async function runAudit(): Promise<void> {
       writeFileSync(cover, (await window.webContents.capturePage()).toPNG())
       captures.push(cover)
     }
+    if (name === 'food') {
+      for (const section of ['M1', 'M2', 'M3', 'M4', 'M5', 'M6']) {
+        await window.webContents.executeJavaScript(`document.querySelector('[data-section="${section}"]').scrollIntoView({block:'start',behavior:'instant'})`)
+        await new Promise(resolveWait => setTimeout(resolveWait, 60))
+        const sectionCapture = join(outputDir, `merchant-food-${section}.png`)
+        writeFileSync(sectionCapture, (await window.webContents.capturePage()).toPNG())
+        captures.push(sectionCapture)
+      }
+    }
     await window.webContents.executeJavaScript('document.querySelector(".material-insight-cloud").scrollIntoView({block:"start",behavior:"instant"})')
     const beforeY = await window.webContents.executeJavaScript('window.scrollY')
-    await window.webContents.executeJavaScript('document.getElementById("cloud-term-7").click()')
+    await window.webContents.executeJavaScript('document.querySelector(".cloud-ranking-disclosure").open = true; document.getElementById("cloud-term-7").click()')
     const selected = await window.webContents.executeJavaScript(`({ visible:getComputedStyle(document.getElementById('cloud-evidence-7')).display !== 'none', oldHidden:getComputedStyle(document.getElementById('cloud-evidence-0')).display === 'none', y:window.scrollY })`)
     assert.equal(selected.visible, true)
     assert.equal(selected.oldHidden, true)

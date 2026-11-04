@@ -2661,6 +2661,78 @@ body.resizing .pane-resizer {
   line-height: 1.7;
 }
 
+.report-points-estimate {
+  margin-top: 18px;
+  padding: 16px;
+  border: 1px solid #cde7df;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #f0faf6, #f5f9ff);
+}
+
+.report-points-estimate-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.report-points-estimate-header h3 {
+  margin: 0;
+  color: #223e37;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.6;
+}
+
+.report-points-estimate-header > span {
+  padding: 2px 6px;
+  border: 1px solid #d7e8df;
+  border-radius: 5px;
+  background: #fff;
+  color: #53675f;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.report-points-estimate-range {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  margin: 14px 0 8px;
+  color: #45645a;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.report-points-estimate-range strong {
+  color: #17634d;
+  font-size: 27px;
+  font-weight: 800;
+  letter-spacing: -0.6px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.report-points-estimate-reserve {
+  margin: 0;
+  color: #31574b;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.report-points-estimate-reserve strong { font-weight: 750; }
+
+.report-points-estimate-note {
+  margin: 12px 0 0;
+  padding-top: 11px;
+  border-top: 1px solid #dce9e4;
+  color: #62716b;
+  font-size: 12px;
+  line-height: 1.75;
+}
+
 .report-skeleton-list {
   display: grid;
   grid-template-columns: 1fr;

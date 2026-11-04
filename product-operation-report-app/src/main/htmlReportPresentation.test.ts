@@ -145,7 +145,7 @@ describe('v1 M1-M8 visual planning', () => {
     expect(model.sections.find((section) => section.number === 'M3')?.tables[0]?.rows[0]).toEqual([
       '3.1｜厨房制作型｜食欲切入｜制作展示｜推荐',
       '20条｜占自有素材40.0%',
-      '没胃口切入→厨房制作→成品展示→邀请尝试'
+      '没胃口切入→厨房制作→成品展示→邀请尝试', '', ''
     ])
     expect(model.sections.find((section) => section.number === 'M5')?.tables[0]?.rows[0]?.[1]).not.toContain('TOP1')
     const presentation = buildHtmlReportPresentation(model)
@@ -242,11 +242,12 @@ describe('v2 M1-M6 visual planning', () => {
     expect((html.match(/class="level-2"/gu) || [])).toHaveLength(2)
     expect(html).not.toContain('class="level-3"')
     expect((html.match(/class="print-module-copy"/gu) || [])).toHaveLength(2)
-    const coreAudienceIndex = html.search(/<h1[^>]*>多平台核心人群TOP5<\/h1>/u)
+    const coreAudienceIndex = html.indexOf('<section class="reference-audience-strategies">')
     const profileDetailsIndex = html.indexOf('<details class="evidence-disclosure module-details profile-details">')
     expect(coreAudienceIndex).toBeGreaterThan(0)
     expect(profileDetailsIndex).toBeGreaterThan(coreAudienceIndex)
-    expect(html.slice(profileDetailsIndex, html.indexOf('</details>', profileDetailsIndex))).not.toContain(
+    // Strategy cards stay visible; the complete source table remains available on demand.
+    expect(html.slice(profileDetailsIndex, html.indexOf('</details>', profileDetailsIndex))).toContain(
       '多平台核心人群TOP5'
     )
   })

@@ -322,7 +322,7 @@ function synthesizeModuleTables(number: string, title: string, markdown: string)
       const info = lines.slice(index + 1, index + 5).find((line) => /^信息(?:冲突)?\s*[：:]/u.test(line)) || ''
       const source = lines.slice(index + 1, index + 6).find((line) => /^来源\s*[：:]/u.test(line)) || ''
       const value = info.replace(/^信息(?:冲突)?\s*[：:]\s*/u, '').trim()
-      const items = value.split(/[，,；;]/u).map((item) => item.trim()).filter(Boolean)
+      const items = value.split(/[，,、；;]/u).map((item) => item.trim()).filter(Boolean)
       for (const item of items.length ? items : [value || '暂无分析']) {
         const metric = item.match(/^(.*?)([+-]?\d+(?:\.\d+)?\s*%)(?:\s*(?:（[^）]*）|\([^)]*\)))?\s*[。；;，,]?\s*$/u)
         const category = metric?.[1]?.trim() || dimension
@@ -356,9 +356,9 @@ function synthesizeModuleTables(number: string, title: string, markdown: string)
         const framework = labeledValue(block.lines, ['框架类型', '机会框架'])
         const basis = labeledValue(block.lines, ['数据依据', '竞品依据'])
         const reuse = labeledValue(block.lines, ['可复用方向', '可补充方向'])
-        return [framework || block.title, basis || '数量依据见模块原文', reuse || '暂无分析']
+        return [framework || block.title, basis || '数量依据见模块原文', reuse || '暂无分析', labeledValue(block.lines, ['主要人群']), labeledValue(block.lines, ['自有现状'])]
       })
-      return rows.length ? [{ context: bucket.context, headers: ['类型', '数据依据', '可复用方向'], rows }] : []
+      return rows.length ? [{ context: bucket.context, headers: ['类型', '数据依据', '可复用方向', '主要人群', '自有现状'], rows }] : []
     })
   }
   if (number === 'M4' && /对标/u.test(title)) {
@@ -375,7 +375,8 @@ function synthesizeModuleTables(number: string, title: string, markdown: string)
     const blocks = splitBlocks(lines, /^(?:\d+[.、]\s*)?(?:品质需求|价格需求|健康需求|情感需求)$/u)
     const rows = blocks.flatMap((block) => {
       const category = block.title.replace(/^\d+[.、]\s*/u, '')
-      const topBlocks = splitBlocks(block.lines, /^TOP\s*\d+/iu)
+      const rankStart = block.lines.findIndex(line => /^TOP\s*\d+\s*[｜|]/iu.test(line))
+      const topBlocks = splitBlocks(rankStart >= 0 ? block.lines.slice(0, rankStart) : block.lines, /^TOP\s*\d+$/iu)
       if (!topBlocks.length) return [[category, block.lines[0] || '暂无分析', block.lines.slice(1).join('；') || '依据见模块原文']]
       return topBlocks.map((item) => {
         const selling = item.lines.find((line) => /^卖点\s*[：:]/u.test(line)) || ''
@@ -464,9 +465,11 @@ function synthesizeModuleTables(number: string, title: string, markdown: string)
       read(block, ['核心人群']),
       read(block, ['核心卖点']),
       read(block, ['真实场景']),
-      [read(block, ['人群来源', '人群依据']), read(block, ['卖点来源', '卖点依据']), read(block, ['场景来源', '场景依据'])].filter(Boolean).join('；')
+      [read(block, ['人群来源', '人群依据']), read(block, ['卖点来源', '卖点依据']), read(block, ['场景来源', '场景依据'])].filter(Boolean).join('；'),
+      read(block, ['匹配理由']),
+      read(block, ['内容策略', '内容表达'])
     ])
-    return rows.length ? [{ context: '人群卖点场景匹配', headers: ['排序', '成交人群', '核心卖点', '核心场景', '数据依据'], rows }] : []
+    return rows.length ? [{ context: '人群卖点场景匹配', headers: ['排序', '成交人群', '核心卖点', '核心场景', '数据依据', '匹配理由', '内容策略'], rows }] : []
   }
   return []
 }

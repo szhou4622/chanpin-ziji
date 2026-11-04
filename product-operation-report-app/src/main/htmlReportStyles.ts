@@ -1,4 +1,5 @@
 import { renderModernReportStyles } from './htmlReportDesign'
+import { renderReferenceReportStyles } from './htmlReportReferenceStyles'
 
 export interface ReportThemeTokens {
   paper: string
@@ -1307,5 +1308,6 @@ export function renderReportStyles(tokens: ReportThemeTokens): string {
       padding-inline: 0;
       border-left: 0;
     }
-  }`
+  }
+  ${renderReferenceReportStyles()}`
 }
